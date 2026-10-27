@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html { overflow-y: scroll; scrollbar-gutter: stable; }
+
+@layer base { body { @apply m-0 bg-zinc-400 text-zinc-950; } button, input, textarea, select { font: inherit; } th, td { @apply px-2 py-2; } }
+@layer components { .counter-input { @apply border border-zinc-500 bg-white px-1.5 py-1 outline-none focus:border-[#3a7fb8] focus:ring-1 focus:ring-[#3a7fb8] disabled:cursor-not-allowed disabled:bg-zinc-200; } .amount-line { @apply mb-2 grid grid-cols-[90px_1fr] gap-2 sm:grid-cols-[110px_1fr]; } .form-inp { @apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 disabled:cursor-not-allowed disabled:bg-slate-100; } }
+
+@page {
+  size: A4 portrait;
+  margin: 10mm 12mm;
+}
+
+@media print {
+  html, body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+
+  header,
+  aside,
+  nav,
+  footer,
+  .no-print,
+  .sales-report-filters,
+  .sales-report-actions,
+  .sales-report-preview-header,
+  .sales-report-print-page > div:first-child {
+    display: none !important;
+  }
+
+  .min-h-screen,
+  .grid,
+  main,
+  .sales-report-print-page,
+  .sales-report-layout,
+  .sales-report-preview {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+  }
+
+  #sales-report-print {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 auto !important;
+    padding: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+}
