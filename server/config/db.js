@@ -16,6 +16,7 @@ dotenv.config({ path: serverEnvPath, override: true });
 let pool;
 let hrEmployeePool;
 let ucfePool;
+let ifsPool;
 const useWindowsAuthentication = String(process.env.SQL_AUTH_MODE || '').toLowerCase() === 'windows';
 const sqlServer = process.env.SQL_SERVER || process.env.DB_SERVER || 'localhost';
 const sqlInstance = process.env.SQL_INSTANCE || process.env.DB_INSTANCE;
@@ -119,6 +120,17 @@ export function getUcfePool() {
   return ucfePool;
 }
 
+export function getIfsPool() {
+  if (!ifsPool) {
+    const databaseName = process.env.DB_dbAsslAppToIFS || process.env.DB_ASSL_APP_TO_IFS || 'dbAsslAppToIFS';
+    ifsPool = new sql.ConnectionPool(buildConfig(databaseName));
+    ifsPool.on('error', (error) => {
+      console.error(`SQL pool error [${databaseName}]:`, error.message);
+    });
+  }
+  return ifsPool;
+}
+
 export function runWithAirportDatabase(airportCode, callback) {
   const code = String(airportCode || '').trim().toUpperCase();
   if (!Object.hasOwn(AIRPORT_DB_MAP, code)) {
@@ -165,6 +177,11 @@ export { sql };
 export default async function connectDatabase() {
   if (!useWindowsAuthentication && (!sqlUser || !sqlPassword)) throw new Error('Set SQL_USER and SQL_PASSWORD (or DB_USER and DB_PASSWORD), or set SQL_AUTH_MODE=windows.');
   await getUcfePool().connect();
+  try {
+    await getIfsPool().connect();
+  } catch (error) {
+    console.warn('SQL Server connection warning for dbAsslAppToIFS:', error.message);
+  }
 
   const airportConnections = await Promise.all(AIRPORT_CODES.map(async code => {
     try {

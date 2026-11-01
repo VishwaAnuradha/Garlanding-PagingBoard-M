@@ -52,8 +52,9 @@ async function getPrinterStatuses() {
   try {
     const command = [
       '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);',
-      'Get-CimInstance Win32_Printer -Property Name,WorkOffline,PrinterStatus,PrinterState,ExtendedPrinterStatus,DetectedErrorState |',
-      'Select-Object Name,WorkOffline,PrinterStatus,PrinterState,ExtendedPrinterStatus,DetectedErrorState | ConvertTo-Json -Compress'
+      '$printers = Get-CimInstance Win32_Printer -Property Name,WorkOffline,PrinterStatus,PrinterState,ExtendedPrinterStatus,DetectedErrorState,PortName | Select-Object Name,WorkOffline,PrinterStatus,PrinterState,ExtendedPrinterStatus,DetectedErrorState,PortName;',
+      '$pnp = Get-PnpDevice | Where-Object { $_.Class -in \'USB\', \'SoftwareDevice\' -and ($_.FriendlyName -like \'*EPSON*\' -or $_.FriendlyName -like \'*Receipt*\' -or $_.InstanceId -like \'*USBPRINT*\' -or $_.InstanceId -like \'*EPSON*\') } | Select-Object FriendlyName, Status, Present, Class, InstanceId;',
+      '@{ printers = $printers; pnp = $pnp } | ConvertTo-Json -Compress -Depth 3'
     ].join(' ');
     const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
       timeout: 8000,
@@ -61,8 +62,13 @@ async function getPrinterStatuses() {
     });
     if (!stdout.trim()) return [];
     const result = JSON.parse(stdout);
-    const printers = Array.isArray(result) ? result : [result];
-    return printers.map(printer => {
+    const printersList = Array.isArray(result.printers) ? result.printers : result.printers ? [result.printers] : [];
+    const pnpList = Array.isArray(result.pnp) ? result.pnp : result.pnp ? [result.pnp] : [];
+
+    return printersList.map(printer => {
+      const printerName = String(printer.Name || '');
+      const isEpsonOrPos = /epson|tm-t81|receipt|pos/i.test(printerName);
+
       const offline = printer.WorkOffline === true || 
                       Number(printer.PrinterStatus) === 7 ||
                       Number(printer.ExtendedPrinterStatus) === 7 ||
@@ -71,10 +77,24 @@ async function getPrinterStatuses() {
                       (Number(printer.PrinterState) & 2) !== 0;
       const errorState = Number(printer.DetectedErrorState);
       const hasDeviceError = Number.isFinite(errorState) && errorState >= 3;
+
+      let isHardwareConnected = true;
+      if (isEpsonOrPos && pnpList.length > 0) {
+        const matchingPnp = pnpList.filter(d => 
+          /epson|tm-t81/i.test(d.FriendlyName || '') || /epson|tm-t81/i.test(d.InstanceId || '')
+        );
+        if (matchingPnp.length > 0) {
+          isHardwareConnected = matchingPnp.some(d => d.Present === true && d.Status === 'OK');
+        }
+      }
+
+      const available = !offline && !hasDeviceError && isHardwareConnected;
+
       return {
-        name: String(printer.Name || ''),
-        available: !offline && !hasDeviceError,
-        message: offline ? 'Offline' : hasDeviceError ? 'Printer reports an error' : 'Ready'
+        name: printerName,
+        available,
+        status: available ? 'Ready' : 'Not Connect',
+        message: available ? 'Ready' : 'Not Connect'
       };
     });
   } catch {
@@ -88,7 +108,7 @@ router.get('/printers', async (_req, res, next) => {
     const printersWithStatus = statuses.map(s => ({
       name: s.name,
       available: s.available,
-      status: s.message || 'Ready'
+      status: s.status || (s.available ? 'Ready' : 'Not Connect')
     }));
     const defaultPrinter = printersWithStatus.find(p => p.name.includes('EPSON') || p.name.includes('Receipt'))?.name || printersWithStatus[0]?.name || null;
     res.json({

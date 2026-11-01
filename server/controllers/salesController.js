@@ -1,6 +1,7 @@
 import { getPoolForAirport, sql } from '../config/db.js';
 import { getDaySummary } from '../services/salesService.js';
 import { getBusinessDate, toBusinessDateTime } from '../utils/businessDate.js';
+import { syncSessionToIfs } from '../services/ifsSyncService.js';
 
 function isValidDateOnly(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -84,7 +85,13 @@ export async function createSale(req, res) {
     .input('sessionId', req.user?.sessionId ?? null).input('creditFlag', sql.Int, paymentFlag)
     .query(`
       DECLARE @NewSerialNo INT = ISNULL((SELECT MAX(SERIALNO) FROM dbo.TICKETING_C), 0) + 1;
-      DECLARE @NewSubSerialNo INT = ISNULL((SELECT MAX(SERIALNO) FROM ${targetTable}), 0) + 1;
+      DECLARE @NewSubSerialNo INT = ISNULL((
+        SELECT MAX(s) FROM (
+          SELECT MAX(SERIALNO) AS s FROM ${targetTable}
+          UNION ALL
+          SELECT MAX(SERIALNO) AS s FROM dbo.ERRORTICKETING WHERE ${ticketTypeId === 1 ? 'TICKET_TYPE_ID = 1' : 'TICKET_TYPE_ID IN (2, 3)'}
+        ) AS maxSerials
+      ), 0) + 1;
       DECLARE @now DATETIME = GETDATE();
 
       INSERT INTO ${targetTable} (${subTableCols})
@@ -271,6 +278,50 @@ export async function closeTodaySales(req, res) {
       `);
     await transaction.commit();
   } catch (error) { await transaction.rollback(); throw error; }
+
+  // Sync session closing sales data to dbAsslAppToIFS (Garlanding appId: 7, Paging Board appId: 10)
+  try {
+    let operatorName = '';
+    try {
+      const userRes = await pool.request().input('epf', req.user?.epfNumber).query(
+        'SELECT TOP 1 Name FROM dbo.USERS WHERE EmployeeNo = @epf OR UserID = @epf'
+      );
+      operatorName = userRes.recordset[0]?.Name || '';
+    } catch {}
+
+    const incRes = await pool.request().input('sessionId', req.user?.sessionId).query(`
+      SELECT TICKET_TYPE, START_SERIAL_NO, END_SERIAL_NO, CASH_COUNT, CREDIT_COUNT
+      FROM dbo.SESSIONINCOME
+      WHERE SessionId = @sessionId
+    `);
+    const gInc = incRes.recordset.find(r => r.TICKET_TYPE === 1) || {};
+    const pInc = incRes.recordset.find(r => r.TICKET_TYPE === 2) || {};
+
+    await syncSessionToIfs({
+      sessionId: req.user?.sessionId,
+      operatorId: req.user?.epfNumber,
+      operatorName,
+      sessionStartedAt,
+      sessionEndedAt,
+      garlanding: {
+        unitPrice: ticketPrices.GARLANDING,
+        cashQty: (gInc.CASH_COUNT || 0) + manualGarlandingCashQty,
+        creditQty: (gInc.CREDIT_COUNT || 0) + manualGarlandingCreditQty,
+        minSerial: gInc.START_SERIAL_NO,
+        maxSerial: gInc.END_SERIAL_NO,
+      },
+      pagingBoard: {
+        unitPrice: ticketPrices['PAGING BOARD'],
+        cashQty: (pInc.CASH_COUNT || 0) + manualPagingBoardCashQty,
+        creditQty: (pInc.CREDIT_COUNT || 0) + manualPagingBoardCreditQty,
+        minSerial: pInc.START_SERIAL_NO,
+        maxSerial: pInc.END_SERIAL_NO,
+      },
+    });
+  } catch (ifsError) {
+    console.error('IFS sync error on session close:', ifsError.message);
+  }
+
   res.json(await getDaySummary(businessDate, req.user?.sessionId, pool));
 }
 
@@ -547,17 +598,15 @@ export async function voidTicket(req, res) {
       .input('credit', ticket.credit);
 
     await reqTx.query(`
-      DECLARE @NewId INT = (SELECT ISNULL(MAX(ID), 0) + 1 FROM dbo.ERRORTICKETING WITH (UPDLOCK, HOLDLOCK));
-
       IF COL_LENGTH('dbo.ERRORTICKETING', 'RECEIPT_NO') IS NOT NULL
       BEGIN
         INSERT INTO dbo.ERRORTICKETING (ID, SERIALNO, TICKET_TYPE_ID, USERID, SESSIONENDFLAG, DATETIME, CHARGE, QTY, F_NO, COMPANY, RECEIPT_NO, SessionId, CREDIT)
-        VALUES (@NewId, @serialNo, @ticketTypeId, @userId, @sessionEndFlag, @createdAt, @charge, @qty, @flightNo, @company, @serialNo, @sessionId, @credit);
+        VALUES (@serialNo, @serialNo, @ticketTypeId, @userId, @sessionEndFlag, @createdAt, @charge, @qty, @flightNo, @company, @serialNo, @sessionId, @credit);
       END
       ELSE
       BEGIN
         INSERT INTO dbo.ERRORTICKETING (ID, SERIALNO, TICKET_TYPE_ID, USERID, SESSIONENDFLAG, DATETIME, CHARGE, QTY, F_NO, COMPANY, SessionId, CREDIT)
-        VALUES (@NewId, @serialNo, @ticketTypeId, @userId, @sessionEndFlag, @createdAt, @charge, @qty, @flightNo, @company, @sessionId, @credit);
+        VALUES (@serialNo, @serialNo, @ticketTypeId, @userId, @sessionEndFlag, @createdAt, @charge, @qty, @flightNo, @company, @sessionId, @credit);
       END
     `);
 

@@ -53,20 +53,21 @@ export default function CounterPage({ readOnly = false, onTicketTypeChange, onLo
 
       if (active) {
         setPrinterName(active.name);
-        setPrinterStatus(active.status || (active.available ? 'Ready' : 'Offline'));
-        setIsPrinterOnline(active.available !== false);
+        const isOnline = active.available !== false && active.status !== 'Not Connect' && active.status !== 'Offline';
+        setPrinterStatus(isOnline ? 'Ready' : 'Not Connect');
+        setIsPrinterOnline(isOnline);
       } else if (data?.defaultPrinter) {
         setPrinterName(data.defaultPrinter);
-        setPrinterStatus('Ready');
-        setIsPrinterOnline(true);
+        setPrinterStatus('Not Connect');
+        setIsPrinterOnline(false);
       } else {
         setPrinterName('EPSON TM-T81III Receipt');
-        setPrinterStatus('Ready');
-        setIsPrinterOnline(true);
+        setPrinterStatus('Not Connect');
+        setIsPrinterOnline(false);
       }
     } catch {
       setPrinters([]);
-      setPrinterStatus('Service offline');
+      setPrinterStatus('Not Connect');
       setIsPrinterOnline(false);
     } finally {
       setPrintersLoading(false);
@@ -78,8 +79,9 @@ export default function CounterPage({ readOnly = false, onTicketTypeChange, onLo
     localStorage.setItem('selected_printer', name);
     const found = printers.find(p => p.name === name);
     if (found) {
-      setPrinterStatus(found.status || (found.available ? 'Ready' : 'Offline'));
-      setIsPrinterOnline(found.available !== false);
+      const isOnline = found.available !== false && found.status !== 'Not Connect' && found.status !== 'Offline';
+      setPrinterStatus(isOnline ? 'Ready' : 'Not Connect');
+      setIsPrinterOnline(isOnline);
     }
   };
 
@@ -91,6 +93,8 @@ export default function CounterPage({ readOnly = false, onTicketTypeChange, onLo
       setMessage(error.message); 
     }); 
     fetchPrinters();
+    const interval = setInterval(fetchPrinters, 5000);
+    return () => clearInterval(interval);
   }, [fetchPrinters]);
   
   const change = (key, value) => setForm(current => ({ ...current, [key]: value }));

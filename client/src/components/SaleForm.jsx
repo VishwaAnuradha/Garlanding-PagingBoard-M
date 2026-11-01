@@ -90,7 +90,7 @@ export default function SaleForm({
             : 'bg-rose-100 text-rose-800'
         }`}>
           <span className={`h-1.5 w-1.5 rounded-full ${isPrinterOnline ? 'bg-emerald-600' : 'bg-rose-600'}`} />
-          {isPrinterOnline ? 'Ready' : printerStatus || 'Offline'}
+          {isPrinterOnline ? 'Ready' : (printerStatus && printerStatus !== 'Offline' ? printerStatus : 'Not Connect')}
         </span>
         {onRefreshPrinters && (
           <button
