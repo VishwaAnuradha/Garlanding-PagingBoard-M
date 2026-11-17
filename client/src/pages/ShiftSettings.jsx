@@ -1,19 +1,25 @@
+// Airport and Aviation Services (Sri Lanka) - Garlanding & Paging Board Counter
+// Shift Settings Page Component: Create, schedule, and activate counter work shifts
+
 import { useEffect, useState } from 'react';
 import { CalendarClock, CheckCircle2, Clock, Plus, RefreshCw } from 'lucide-react';
 import { createShiftSession, getShiftSessions, updateShiftSessionStatus } from '../services/salesService';
 import { formatBusinessDateTime as displayDate } from '../utils/formatters';
 
+// Format Date object to local YYYY-MM-DD input string
 const toInput = date => { 
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000); 
   return local.toISOString().slice(0, 10); 
 };
 
+// Initial form state with default 8-hour shift window
 const initialForm = () => ({ 
   startAt: toInput(new Date()), 
   endAt: toInput(new Date(Date.now() + 8 * 60 * 60 * 1000)), 
   shiftType: '' 
 });
 
+// Render badge reflecting whether session is Active, Closed, or Pending
 function StatusAction({ session }) {
   if (session.active) {
     return (
@@ -38,12 +44,14 @@ function StatusAction({ session }) {
 }
 
 export default function ShiftSettings() {
+  // State for shift creation form, session list, feedback messages, and loading flags
   const [form, setForm] = useState(initialForm);
   const [sessions, setSessions] = useState([]);
   const [message, setMessage] = useState('');
   const [saving, setSaving] = useState(false);
   const [updatingId, setUpdatingId] = useState(null);
 
+  // Fetch all shift sessions from the backend API
   const load = async () => { 
     try { 
       const data = await getShiftSessions(); 
@@ -53,8 +61,10 @@ export default function ShiftSettings() {
     } 
   };
 
+  // Load shift sessions on component mount
   useEffect(() => { load(); }, []);
 
+  // Submit and create a new shift session
   const create = async event => { 
     event.preventDefault(); 
     setSaving(true); 
@@ -71,6 +81,7 @@ export default function ShiftSettings() {
     } 
   };
 
+  // Update shift status (PENDING, ACTIVE, or CLOSED)
   const changeStatus = async (sessionId, nextStatus) => {
     setUpdatingId(sessionId);
     setMessage('');
@@ -87,6 +98,7 @@ export default function ShiftSettings() {
 
   return (
     <div className="max-w-5xl space-y-6">
+      {/* Page Title & Instructions */}
       <div>
         <p className="text-xs font-bold uppercase tracking-wider text-emerald-700">Administration</p>
         <h1 className="mt-1 text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900">Shift settings</h1>
@@ -95,6 +107,7 @@ export default function ShiftSettings() {
         </p>
       </div>
 
+      {/* Shift Creation Form */}
       <form onSubmit={create} className="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-xs">
         <div className="flex items-center gap-3 pb-4 border-b border-slate-100">
           <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-blue-50 text-blue-600 shadow-2xs border border-blue-100/70">
@@ -107,6 +120,7 @@ export default function ShiftSettings() {
         </div>
 
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
+          {/* Start and End Date Inputs */}
           <Field 
             label="Session start date" 
             type="date" 
@@ -121,6 +135,7 @@ export default function ShiftSettings() {
             onChange={event => setForm({ ...form, endAt: event.target.value })} 
             required 
           />
+          {/* Shift Type Selection */}
           <div className="sm:col-span-2">
             <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
               <span className="mb-1.5 block">Shift type</span>
@@ -138,6 +153,7 @@ export default function ShiftSettings() {
           </div>
         </div>
 
+        {/* Submit Button */}
         <button 
           disabled={saving} 
           type="submit"
@@ -148,12 +164,14 @@ export default function ShiftSettings() {
         </button>
       </form>
 
+      {/* Status Feedback Notification */}
       {message && (
         <p className={`rounded-xl p-4 text-xs font-semibold border ${message.includes('created') || message.includes('updated') ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
           {message}
         </p>
       )}
 
+      {/* Existing Shift Sessions Table */}
       <section className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-xs">
         <div className="border-b border-slate-100 px-6 py-4 flex items-center justify-between">
           <h2 className="text-sm font-bold text-slate-900">Created shift sessions</h2>
@@ -218,6 +236,7 @@ export default function ShiftSettings() {
   );
 }
 
+// Reusable label and input field wrapper
 function Field({ label, ...props }) { 
   return (
     <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">

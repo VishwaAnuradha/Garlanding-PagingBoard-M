@@ -1,3 +1,6 @@
+// Airport and Aviation Services (Sri Lanka) - Garlanding & Paging Board Counter
+// Login Page Component: Handles user authentication and airport-specific routing
+
 import { useState } from 'react';
 import { Eye, EyeOff, Plane } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -5,19 +8,29 @@ import aaslLogo from '../assets/aasl-logo.svg';
 
 export default function LoginPage() {
   const { login } = useAuth();
+
+  // Form input state: Selected airport, employee service number, and password
   const [form, setForm] = useState({ airport: 'BIA', ssn: '', password: '' });
+
+  // UI state: Error feedback, submission loading indicator, and password visibility toggle
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+
+  // Update form state on input change
   const change = event => setForm({ ...form, [event.target.name]: event.target.value });
+
+  // Handle form submission and authentication
   const submit = async event => {
     event.preventDefault();
     setLoading(true);
     setError('');
     try {
       const session = await login(form);
+      // Redirect admins and superadmins to the admin dashboard; staff stay on the counter page
       if (['admin', 'superAdmin'].includes(session.user.role)) window.location.assign('/admin');
     } catch (err) {
+      // Display database connectivity warning on 503 or standard error message
       setError(err.status === 503
         ? `Cannot sign in to ${form.airport}: its database is unavailable or access was denied. Contact IT to verify the airport database connection and SQL login permissions.`
         : err.message || 'Invalid airport, SSN, or password.');
@@ -28,6 +41,7 @@ export default function LoginPage() {
 
   return (
   <main className="flex min-h-screen flex-col bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 font-sans">
+    {/* Page Header with AASL Logo and Title */}
     <header className="border-b border-slate-200 bg-white shadow-md">
       <div className="mx-auto flex min-h-28 max-w-7xl items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8">
         <a href="/" className="flex min-w-0 items-center gap-4" aria-label="Airport and Aviation Services home">
@@ -50,6 +64,7 @@ export default function LoginPage() {
       </div>
     </header>
 
+    {/* Center Login Form Container */}
     <div className="flex flex-1 items-center justify-center p-4">
       <form
         onSubmit={submit}
@@ -67,6 +82,7 @@ export default function LoginPage() {
 
         {/* Login fields */}
         <div className="space-y-4 bg-slate-50/80 p-5">
+        {/* Airport Selection */}
         <div>
           <label className="mb-1 block text-xs font-bold uppercase tracking-wider text-slate-700">Airport</label>
           <select
@@ -84,6 +100,7 @@ export default function LoginPage() {
           </select>
         </div>
 
+        {/* SSN / Service Number Input */}
         <div>
           <label className="mb-1 block text-xs font-bold uppercase tracking-wider text-slate-700">SSN / Service Number</label>
           <input
@@ -97,6 +114,7 @@ export default function LoginPage() {
           />
         </div>
 
+        {/* Password Input with Visibility Toggle */}
         <div>
           <label className="mb-1 block text-xs font-bold uppercase tracking-wider text-slate-700">Password</label>
           <div className="relative">

@@ -1,6 +1,21 @@
 const authHeaders = () => { const session = JSON.parse(sessionStorage.getItem('arrival-taxi-session') || 'null'); return session?.token ? { Authorization: `Bearer ${session.token}` } : {}; };
 async function request(url, options = {}) {
-  const response = await fetch(url, { ...options, headers: { ...authHeaders(), ...options.headers } });
+  let response;
+  try {
+    response = await fetch(url, { ...options, headers: { ...authHeaders(), ...options.headers } });
+  } catch (networkError) {
+    const errMsg = networkError?.message || '';
+    if (errMsg.includes('Failed to fetch') || errMsg.includes('NetworkError') || errMsg.includes('ERR_CONNECTION_REFUSED')) {
+      throw new Error('Cannot reach the server. Please check if the server is running and the network cable is connected.');
+    }
+    if (errMsg.includes('ERR_NETWORK_CHANGED') || errMsg.includes('ERR_INTERNET_DISCONNECTED')) {
+      throw new Error('Network connection lost. Please check your LAN or Wi-Fi connection and try again.');
+    }
+    if (errMsg.includes('timeout') || errMsg.includes('Timeout') || errMsg.includes('AbortError')) {
+      throw new Error('The request timed out. The server may be overloaded or unreachable.');
+    }
+    throw new Error('A network error occurred. Please check your connection and try again.');
+  }
   const body = await response.text();
   let data;
   try {
@@ -15,6 +30,20 @@ async function request(url, options = {}) {
   return data;
 }
 export const getTodaySales = () => request('/api/sales/today');
+export async function getConnectionStatus() {
+  try {
+    const response = await fetch('/api/sales/status', { headers: authHeaders() });
+    const data = await response.json().catch(() => null);
+    const isDbConnected = response.ok && data?.database === 'connected';
+    const isServerConnected = response.ok && data?.server === 'connected' && isDbConnected;
+    return {
+      serverConnected: isServerConnected,
+      databaseConnected: isDbConnected
+    };
+  } catch {
+    return { serverConnected: false, databaseConnected: false };
+  }
+}
 export const createSale = (sale) => request('/api/sales', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sale) });
 export const closeTodaySales = (details) => request('/api/sales/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(details) });
 export const reopenTodaySales = () => request('/api/sales/reopen', { method: 'POST' });

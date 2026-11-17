@@ -1,18 +1,27 @@
+// Airport and Aviation Services (Sri Lanka) - Garlanding & Paging Board Counter
+// Error Tickets Page Component: Audit log of voided, cancelled, and erroneous tickets (dbo.ERRORTICKETING)
+
 import { useEffect, useState } from 'react';
 import { getErrorTickets } from '../services/salesService';
 import { RefreshCw } from 'lucide-react';
 
+// Format numbers as Sri Lankan Rupees (Rs. #,###.##)
 const money = value => `Rs. ${Number(value || 0).toLocaleString('en-LK', { maximumFractionDigits: 2 })}`;
 
 export default function ErrorTicketsPage({ ticketType }) {
   const isGarlanding = ticketType === 'GARLANDING';
+
+  // State for error ticket list, pagination metadata, error alerts, and loading
   const [data, setData] = useState({ tickets: [], pagination: { page: 1, totalPages: 1 } });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+
+  // Pagination page and date filter states
   const [page, setPage] = useState(1);
   const [date, setDate] = useState('');
   const limit = 50;
 
+  // Fetch error tickets from the backend API with pagination and optional date filter
   const load = async () => {
     setLoading(true);
     try {
@@ -25,14 +34,17 @@ export default function ErrorTicketsPage({ ticketType }) {
     }
   };
 
+  // Re-fetch tickets whenever page, service type, or date filter changes
   useEffect(() => {
     load();
   }, [page, ticketType, date]);
 
+  // Dynamic page header title based on ticket type
   const pageTitle = ticketType === 'PAGING BOARD' ? 'Paging Board Error Tickets' : 'Garlanding Error Tickets';
 
   return (
     <div className="space-y-6">
+      {/* Page Header: Title, Date Filter, Clear Button, and Refresh */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <p className="text-xs font-bold uppercase tracking-wider text-rose-700">Audit &amp; Exceptions</p>
@@ -44,6 +56,7 @@ export default function ErrorTicketsPage({ ticketType }) {
           </p>
         </div>
 
+        {/* Date Filter & Action Controls */}
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-500">
             <span>Date</span>
@@ -80,12 +93,14 @@ export default function ErrorTicketsPage({ ticketType }) {
         </div>
       </div>
 
+      {/* Error message banner */}
       {error && (
         <p className="rounded-xl bg-red-50 p-4 text-sm font-medium text-red-700 border border-red-200">
           {error}
         </p>
       )}
 
+      {/* Error Tickets Table */}
       <div className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-xs">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm whitespace-nowrap">

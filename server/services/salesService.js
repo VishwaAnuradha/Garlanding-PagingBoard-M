@@ -17,14 +17,37 @@ export async function getDaySummary(businessDate, sessionId, pool) {
     ? 'SessionId = @sessionId'
     : 'CONVERT(char(10), SESSION_START_DATETIME, 23) = @businessDate';
 
+  // TICKETING_G and TICKETING_P are the source-of-truth ticket tables.  A
+  // counter row is written to TICKETING_C as well, but an interrupted legacy
+  // write can leave a valid ticket in its source table without that mirror
+  // row.  Reading the source tables prevents those tickets being omitted from
+  // the live counter totals.
   const salesQuery = `
-      SELECT ID AS id, CONVERT(char(10), DATETIME, 23) AS businessDate, F_NO AS flightNo,
-        COMPANY AS company, TICKET_TYPE_ID AS ticketType, QTY AS qty,
-        CHARGE AS amount, 'counter' AS source, DATETIME AS createdAt, SessionId AS sessionId,
-        ISNULL(CREDIT, 0) AS credit
-      FROM dbo.TICKETING_C WHERE ${whereCondition}
-        AND SERIALNO NOT IN (SELECT SERIALNO FROM dbo.ERRORTICKETING WHERE SERIALNO IS NOT NULL)
-      ORDER BY DATETIME DESC`;
+      SELECT g.ID AS id, CONVERT(char(10), g.DATETIME, 23) AS businessDate, g.F_NO AS flightNo,
+        g.COMPANY AS company, g.TICKET_TYPE_ID AS ticketType, g.QTY AS qty,
+        g.CHARGE AS amount, 'counter' AS source, g.DATETIME AS createdAt, g.SessionId AS sessionId,
+        ISNULL(g.CREDIT, 0) AS credit
+      FROM dbo.TICKETING_G g
+      WHERE ${whereCondition.replaceAll('SessionId', 'g.SessionId').replaceAll('DATETIME', 'g.DATETIME')}
+        AND NOT EXISTS (
+          SELECT 1 FROM dbo.ERRORTICKETING e
+          WHERE e.SERIALNO = g.SERIALNO AND e.TICKET_TYPE_ID = 1
+        )
+
+      UNION ALL
+
+      SELECT p.ID AS id, CONVERT(char(10), p.DATETIME, 23) AS businessDate, p.F_NO AS flightNo,
+        p.COMPANY AS company, p.TICKET_TYPE_ID AS ticketType, p.QTY AS qty,
+        p.CHARGE AS amount, 'counter' AS source, p.DATETIME AS createdAt, p.SessionId AS sessionId,
+        ISNULL(p.CREDIT, 0) AS credit
+      FROM dbo.TICKETING_P p
+      WHERE ${whereCondition.replaceAll('SessionId', 'p.SessionId').replaceAll('DATETIME', 'p.DATETIME')}
+        AND NOT EXISTS (
+          SELECT 1 FROM dbo.ERRORTICKETING e
+          WHERE e.SERIALNO = p.SERIALNO AND e.TICKET_TYPE_ID IN (2, 3)
+        )
+
+      ORDER BY createdAt DESC`;
 
   const request = pool.request();
   if (sessionId) {

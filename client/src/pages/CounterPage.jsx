@@ -3,7 +3,7 @@ import DailyTotals from '../components/DailyTotals';
 import CloseSalesModal from '../components/CloseSalesModal';
 import SaleForm from '../components/SaleForm';
 import { useAuth } from '../context/AuthContext';
-import { printTicketSilently } from '../utils/ticketPrinter';
+import { printTicketSilently, printSessionSummaryReceiptSilently } from '../utils/ticketPrinter';
 import useClock from '../hooks/useClock';
 import { closeTodaySales, createSale, getTodaySales, reopenTodaySales, voidTicket } from '../services/salesService';
 import { getLocalPrinters } from '../services/localPrintService';
@@ -27,9 +27,10 @@ export default function CounterPage({ readOnly = false, onTicketTypeChange, onLo
   const [showTicketMenu, setShowTicketMenu] = useState(false); 
 
   const [printers, setPrinters] = useState([]);
-  const [printerName, setPrinterName] = useState(() => localStorage.getItem('selected_printer') || 'EPSON TM-T81III Receipt');
+  const [printerName, setPrinterName] = useState('');
+  const [configuredInDb, setConfiguredInDb] = useState(false);
   const [printerStatus, setPrinterStatus] = useState('Checking...');
-  const [isPrinterOnline, setIsPrinterOnline] = useState(true);
+  const [isPrinterOnline, setIsPrinterOnline] = useState(false);
   const [printersLoading, setPrintersLoading] = useState(false);
 
   const clock = useClock();
@@ -45,28 +46,28 @@ export default function CounterPage({ readOnly = false, onTicketTypeChange, onLo
       const list = data?.printers || [];
       setPrinters(list);
 
-      const saved = localStorage.getItem('selected_printer');
-      const savedPrinter = list.find(p => p.name === saved);
-      const epsonPrinter = list.find(p => /epson|tm-t81|receipt/i.test(p.name));
-      const defaultP = list.find(p => p.name === data?.defaultPrinter);
-      const active = savedPrinter || epsonPrinter || defaultP || list[0];
-
-      if (active) {
-        setPrinterName(active.name);
-        const isOnline = active.available !== false && active.status !== 'Not Connect' && active.status !== 'Offline';
-        setPrinterStatus(isOnline ? 'Ready' : 'Not Connect');
-        setIsPrinterOnline(isOnline);
-      } else if (data?.defaultPrinter) {
-        setPrinterName(data.defaultPrinter);
-        setPrinterStatus('Not Connect');
+      // STRICT CHECK: Has a printer been configured in TSettings table?
+      if (!data?.configuredInDb || !data?.configuredPrinter) {
+        setPrinterName('');
+        setConfiguredInDb(false);
+        setPrinterStatus('Not Configured in TSettings');
         setIsPrinterOnline(false);
-      } else {
-        setPrinterName('EPSON TM-T81III Receipt');
-        setPrinterStatus('Not Connect');
-        setIsPrinterOnline(false);
+        return;
       }
+
+      // Printer IS configured in TSettings:
+      const configuredName = data.configuredPrinter;
+      setPrinterName(configuredName);
+      setConfiguredInDb(true);
+
+      const found = list.find(p => p.name.toLowerCase() === configuredName.toLowerCase());
+      const isOnline = Boolean(found && found.available !== false && found.status !== 'Not Connect' && found.status !== 'Offline');
+      setPrinterStatus(isOnline ? 'Ready' : (found ? found.status || 'Not Connect' : 'Not Connect'));
+      setIsPrinterOnline(isOnline);
     } catch {
       setPrinters([]);
+      setConfiguredInDb(false);
+      setPrinterName('');
       setPrinterStatus('Not Connect');
       setIsPrinterOnline(false);
     } finally {
@@ -105,6 +106,11 @@ export default function CounterPage({ readOnly = false, onTicketTypeChange, onLo
   const submit = async event => {
     event.preventDefault();
     if (readOnly || !form.flightNo.trim() || !form.company.trim() || summary.closed) return;
+    if (!configuredInDb || !printerName) {
+      setMessageType('error');
+      setMessage('Printing disabled: No printer is configured in database [Garlanding_3].[dbo].[TSettings]. Please insert printer details into TSettings table first.');
+      return;
+    }
 
     setSaving(true);
     clearTimeout(successTimer.current);
@@ -112,24 +118,37 @@ export default function CounterPage({ readOnly = false, onTicketTypeChange, onLo
     try {
       const { sale, summary: next } = await createSale(form);
       setSummary(next);
+      const currentAirport = session?.user?.airport || session?.airport || 'BIA';
+      const currentSessionId = sale?.sessionId || session?.user?.sessionId || session?.sessionId;
+      const currentUserId = sale?.userId || session?.user?.epfNumber || session?.user?.ssn || session?.user?.userId || '';
+      const saleToPrint = {
+        ...sale,
+        airport: sale?.airport || currentAirport,
+        sessionId: currentSessionId,
+        userId: currentUserId,
+        ticketType: form.ticketType,
+        paymentMethod: form.paymentMethod,
+        credit: form.paymentMethod === 'CREDIT_CARD' ? 1 : (sale?.credit ?? 0),
+      };
       setForm({ flightNo: '', company: '', ticketType: form.ticketType, qty: '1', paymentMethod: 'CASH', creditCardNo: '' });
       setMessage('');
       try {
-        await printTicketSilently(sale, printerName);
+        await printTicketSilently(saleToPrint, printerName);
         setMessageType('success');
         setMessage(`Ticket #${sale.serialNo ?? sale.id} printed successfully.`);
         successTimer.current = setTimeout(() => setMessage(''), 5000);
       } catch (printError) {
         // Automatic Error Ticket Recording when printer is disconnected or print fails
         const ticketNumber = sale.serialNo ?? sale.id;
+        const reason = printError?.message ? ` (${printError.message})` : '';
         try {
           const voidResult = await voidTicket(sale.id, true);
           if (voidResult?.summary) setSummary(voidResult.summary);
           setMessageType('error');
-          setMessage(`⚠️ Printer offline: Ticket #${ticketNumber} saved to Error Ticketing.`);
+          setMessage(`⚠️ Printer error${reason}`);
         } catch (voidError) {
           setMessageType('error');
-          setMessage(`⚠️ Print failed: Ticket #${ticketNumber} could not be saved.`);
+          setMessage(`⚠️ Print failed${reason}`);
         }
       }
     } catch (error) {
@@ -140,7 +159,32 @@ export default function CounterPage({ readOnly = false, onTicketTypeChange, onLo
       setSaving(false);
     }
   };
-  const close = async details => { if (readOnly) return; setSaving(true); try { await closeTodaySales(details); setShowCloseModal(false); onLogout?.(); } catch (error) { clearTimeout(successTimer.current); setMessageType('error'); setMessage(error.message); } finally { setSaving(false); } };
+  const close = async details => { 
+    if (readOnly) return; 
+    setSaving(true); 
+    try { 
+      const result = await closeTodaySales(details); 
+
+      // Print two session summary receipts: 1 for Garlanding, 1 for Paging Board
+      const receipts = result?.sessionReceipts || [];
+      for (const receipt of receipts) {
+        try {
+          await printSessionSummaryReceiptSilently(receipt, printerName);
+        } catch (printErr) {
+          console.warn(`Failed to print ${receipt.ticketType} summary receipt:`, printErr?.message);
+        }
+      }
+
+      setShowCloseModal(false); 
+      onLogout?.(); 
+    } catch (error) { 
+      clearTimeout(successTimer.current); 
+      setMessageType('error'); 
+      setMessage(error.message); 
+    } finally { 
+      setSaving(false); 
+    } 
+  };
   const reopen = async () => { if (readOnly || !window.confirm('Reopen today’s sales?')) return; setSaving(true); try { setSummary(await reopenTodaySales()); } catch (error) { clearTimeout(successTimer.current); setMessageType('error'); setMessage(error.message); } finally { setSaving(false); } };
   return <>
   <section className="bg-[#f0f0f0] p-2">{readOnly && 
@@ -167,6 +211,7 @@ export default function CounterPage({ readOnly = false, onTicketTypeChange, onLo
           message={message} 
           messageType={messageType} 
           printerName={printerName}
+          configuredInDb={configuredInDb}
           printers={printers}
           printerStatus={printerStatus}
           isPrinterOnline={isPrinterOnline}

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import printerService from 'pdf-to-printer';
+import { getPool } from '../config/db.js';
 
 const execFileAsync = promisify(execFile);
 const printerApi = printerService.default || printerService;
@@ -102,18 +103,67 @@ async function getPrinterStatuses() {
   }
 }
 
+export async function getConfiguredPrinterFromDb() {
+  try {
+    const pool = getPool();
+    if (!pool.connected) {
+      await pool.connect();
+    }
+    const result = await pool.request().query(`
+      IF OBJECT_ID('dbo.TSettings', 'U') IS NOT NULL
+      BEGIN
+        SELECT TOP 1 Remarks, Description 
+        FROM dbo.TSettings 
+        WHERE Remarks IS NOT NULL AND LTRIM(RTRIM(Remarks)) <> ''
+        ORDER BY ID ASC;
+      END
+      ELSE
+      BEGIN
+        SELECT NULL AS Remarks, NULL AS Description;
+      END
+    `);
+    const row = result.recordset?.[0];
+    const printerName = row?.Remarks ? String(row.Remarks).trim() : null;
+    return printerName;
+  } catch (error) {
+    console.warn('[Printer] Could not read TSettings from database:', error.message);
+    return null;
+  }
+}
+
 router.get('/printers', async (_req, res, next) => {
   try {
+    const configuredPrinter = await getConfiguredPrinterFromDb();
     const statuses = await getPrinterStatuses();
-    const printersWithStatus = statuses.map(s => ({
-      name: s.name,
-      available: s.available,
-      status: s.status || (s.available ? 'Ready' : 'Not Connect')
-    }));
-    const defaultPrinter = printersWithStatus.find(p => p.name.includes('EPSON') || p.name.includes('Receipt'))?.name || printersWithStatus[0]?.name || null;
+
+    // If NO printer is configured in TSettings table on 10.64.30.48:
+    if (!configuredPrinter) {
+      return res.json({
+        configuredInDb: false,
+        configuredPrinter: null,
+        printers: statuses,
+        defaultPrinter: null,
+        canPrint: false,
+        status: 'Not Configured in TSettings',
+        message: 'No printer configured in database [TSettings]. Insert printer details into TSettings first.'
+      });
+    }
+
+    // A printer IS configured in TSettings:
+    const matchedHardware = statuses.find(
+      p => p.name.toLowerCase() === configuredPrinter.toLowerCase()
+    );
+
+    const isAvailable = Boolean(matchedHardware && matchedHardware.available);
+
     res.json({
-      printers: printersWithStatus,
-      defaultPrinter
+      configuredInDb: true,
+      configuredPrinter,
+      printers: statuses,
+      defaultPrinter: configuredPrinter,
+      canPrint: isAvailable,
+      status: isAvailable ? 'Ready' : (matchedHardware ? matchedHardware.status : 'Not Connect'),
+      isAvailable
     });
   } catch (error) {
     next(error);
@@ -123,6 +173,14 @@ router.get('/printers', async (_req, res, next) => {
 router.post('/print', express.raw({ type: 'application/pdf', limit: '10mb' }), async (req, res, next) => {
   let temporaryDirectory;
   try {
+    // STRICT CHECK: Must be configured in database TSettings table!
+    const configuredPrinter = await getConfiguredPrinterFromDb();
+    if (!configuredPrinter) {
+      return res.status(403).json({
+        message: 'Printing is blocked: No printer is configured in database [Garlanding_3].[dbo].[TSettings]. Please insert printer details in TSettings first.'
+      });
+    }
+
     if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
       return res.status(400).json({ message: 'The PDF document is empty or was not provided.' });
     }
@@ -131,28 +189,17 @@ router.post('/print', express.raw({ type: 'application/pdf', limit: '10mb' }), a
     }
 
     const statuses = await getPrinterStatuses();
-
-    const targetPrinterName = String(req.query.printer || '').trim() ||
-      statuses.find(p => p.name.includes('EPSON') || p.name.includes('TM-T81') || p.name.includes('Receipt'))?.name ||
-      statuses[0]?.name ||
-      'EPSON TM-T81III Receipt';
+    const targetPrinterName = configuredPrinter;
 
     const selectedPrinter = statuses.find(p => p.name.toLowerCase() === targetPrinterName.toLowerCase());
     if (!selectedPrinter) {
-      return res.status(503).json({ message: `Printer "${targetPrinterName}" is offline or unavailable.` });
+      return res.status(503).json({ message: `Printer "${targetPrinterName}" configured in TSettings was not found on this computer.` });
     }
 
-    // Check hardware connectivity (detects unplugged USB / offline / paper errors)
-    const hardwareStatus = await checkPrinterHardwareStatus(selectedPrinter.name);
-    if (!hardwareStatus.online) {
+    if (!selectedPrinter.available) {
       await cancelStuckPrintJobs(selectedPrinter.name);
-      const reasonDetail = hardwareStatus.reason === 'USB_DISCONNECTED'
-        ? 'USB cable disconnected'
-        : hardwareStatus.reason === 'WORK_OFFLINE'
-        ? 'Device set to offline'
-        : 'Device offline or paper error';
       return res.status(503).json({ 
-        message: `Printer hardware is unavailable (${reasonDetail}).` 
+        message: `Configured printer "${targetPrinterName}" is currently unavailable (${selectedPrinter.status || selectedPrinter.message || 'Offline'}).` 
       });
     }
 
@@ -162,10 +209,10 @@ router.post('/print', express.raw({ type: 'application/pdf', limit: '10mb' }), a
 
     const printOptions = {
       printer: selectedPrinter.name,
-      silent: true
+      silent: true,
+      scale: req.query.scale ? String(req.query.scale) : 'noscale'
     };
     if (req.query.paperSize) printOptions.paperSize = String(req.query.paperSize);
-    if (req.query.scale) printOptions.scale = String(req.query.scale);
 
     await print(pdfPath, printOptions);
 

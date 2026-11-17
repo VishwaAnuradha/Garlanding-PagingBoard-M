@@ -17,6 +17,7 @@ let pool;
 let hrEmployeePool;
 let ucfePool;
 let ifsPool;
+let mirrorPool;
 const useWindowsAuthentication = String(process.env.SQL_AUTH_MODE || '').toLowerCase() === 'windows';
 const sqlServer = process.env.SQL_SERVER || process.env.DB_SERVER || 'localhost';
 const sqlInstance = process.env.SQL_INSTANCE || process.env.DB_INSTANCE;
@@ -131,6 +132,37 @@ export function getIfsPool() {
   return ifsPool;
 }
 
+export function getMirrorPool() {
+  const isEnabled = asBoolean(process.env.MIRROR_SQL_ENABLED, false);
+  const mirrorServer = process.env.MIRROR_SQL_SERVER;
+  const mirrorDb = process.env.MIRROR_SQL_DATABASE || 'Garlanding_3';
+  if (!isEnabled || !mirrorServer) return null;
+
+  if (!mirrorPool) {
+    const config = {
+      server: mirrorServer,
+      database: mirrorDb,
+      connectionTimeout: asInt(process.env.SQL_CONNECT_TIMEOUT, 15000),
+      requestTimeout: asInt(process.env.SQL_REQUEST_TIMEOUT, 30000),
+      user: process.env.MIRROR_SQL_USER || process.env.SQL_USER,
+      password: process.env.MIRROR_SQL_PASSWORD || process.env.SQL_PASSWORD,
+      port: asInt(process.env.MIRROR_SQL_PORT || process.env.SQL_PORT, 1433),
+      options: {
+        useUTC: false,
+        encrypt: asBoolean(process.env.SQL_ENCRYPT, false),
+        trustServerCertificate: asBoolean(process.env.SQL_TRUST_SERVER_CERTIFICATE, true),
+        cancelTimeout: asInt(process.env.SQL_CANCEL_TIMEOUT, 30000),
+        connectTimeout: asInt(process.env.SQL_CONNECT_TIMEOUT, 15000),
+      },
+    };
+    mirrorPool = new sql.ConnectionPool(config);
+    mirrorPool.on('error', (error) => {
+      console.error(`SQL pool error [MIRROR ${mirrorServer} → ${mirrorDb}]:`, error.message);
+    });
+  }
+  return mirrorPool;
+}
+
 export function runWithAirportDatabase(airportCode, callback) {
   const code = String(airportCode || '').trim().toUpperCase();
   if (!Object.hasOwn(AIRPORT_DB_MAP, code)) {
@@ -176,11 +208,25 @@ export { sql };
 
 export default async function connectDatabase() {
   if (!useWindowsAuthentication && (!sqlUser || !sqlPassword)) throw new Error('Set SQL_USER and SQL_PASSWORD (or DB_USER and DB_PASSWORD), or set SQL_AUTH_MODE=windows.');
-  await getUcfePool().connect();
+  try {
+    await getUcfePool().connect();
+  } catch (error) {
+    console.error(`SQL Server connection failed for UCFE (${process.env.SQL_SERVER}):`, error.message);
+  }
   try {
     await getIfsPool().connect();
   } catch (error) {
     console.warn('SQL Server connection warning for dbAsslAppToIFS:', error.message);
+  }
+
+  const mirror = getMirrorPool();
+  if (mirror) {
+    try {
+      await mirror.connect();
+      console.log(`Connected to mirror database on ${process.env.MIRROR_SQL_SERVER} (${process.env.MIRROR_SQL_DATABASE || 'Garlanding_3'})`);
+    } catch (error) {
+      console.warn(`Mirror database connection warning for ${process.env.MIRROR_SQL_SERVER}:`, error.message);
+    }
   }
 
   const airportConnections = await Promise.all(AIRPORT_CODES.map(async code => {

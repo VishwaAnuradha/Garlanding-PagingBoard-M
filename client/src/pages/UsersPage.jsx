@@ -1,14 +1,20 @@
+// Airport and Aviation Services (Sri Lanka) - Garlanding & Paging Board Counter
+// Users Page Component: Manage system users (SuperAdmin, Administrator, User) from dbo.USERS
+
 import { useEffect, useState } from 'react';
 import { Users, Plus, Pencil, Trash2, X, Save, Eye, EyeOff } from 'lucide-react';
 
+// API route and session authorization header helper
 const API = '/api/users';
 const authHeaders = () => {
   const session = JSON.parse(sessionStorage.getItem('arrival-taxi-session') || 'null');
   return session?.token ? { Authorization: `Bearer ${session.token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
 };
 
+// Initial blank form data schema
 const empty = { userId: '', password: '', employeeNo: '', name: '', division: '', section: '', category: 'User', contacts: '', address: '', shift: '' };
 
+// Helper function for making authenticated API requests
 async function apiFetch(url, options = {}) {
   const res = await fetch(url, { ...options, headers: { ...authHeaders(), ...options.headers } });
   const data = await res.json();
@@ -17,18 +23,24 @@ async function apiFetch(url, options = {}) {
 }
 
 export default function UsersPage() {
+  // State for user records, fetch loading, and error feedback
   const [users, setUsers]           = useState([]);
   const [loading, setLoading]       = useState(true);
   const [error, setError]           = useState('');
+
+  // Modal and form state for creating/editing users
   const [showModal, setShowModal]   = useState(false);
   const [editing, setEditing]       = useState(null);   // null = create, string userId = edit
   const [form, setForm]             = useState(empty);
   const [showPw, setShowPw]         = useState(false);
   const [saving, setSaving]         = useState(false);
   const [formError, setFormError]   = useState('');
+
+  // Delete modal state and table password visibility map
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [visiblePasswords, setVisiblePasswords] = useState({});
 
+  // Fetch all users from the backend API
   const load = async () => {
     setLoading(true);
     try {
@@ -41,16 +53,23 @@ export default function UsersPage() {
     }
   };
 
+  // Load user data on initial component mount
   useEffect(() => { load(); }, []);
 
+  // Open modal in Create mode with empty fields
   const openCreate = () => { setEditing(null); setForm(empty); setFormError(''); setShowPw(false); setShowModal(true); };
+
+  // Open modal in Edit mode populated with selected user data
   const openEdit   = (u) => {
     setEditing(u.UserID);
     setForm({ userId: u.UserID, password: '', employeeNo: u.EmployeeNo || '', name: u.Name || '', division: u.Division || '', section: u.Section || '', category: u.Category || '', contacts: u.Contacts || '', address: u.Address || '', shift: u.Shift || '' });
     setFormError(''); setShowPw(false); setShowModal(true);
   };
+
+  // Close the create/edit modal and clear errors
   const closeModal = () => { setShowModal(false); setFormError(''); };
 
+  // Save new user (POST) or update existing user (PUT)
   const save = async () => {
     setSaving(true); setFormError('');
     try {
@@ -68,6 +87,7 @@ export default function UsersPage() {
     }
   };
 
+  // Confirm and delete user from database (DELETE)
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     try {
@@ -80,11 +100,12 @@ export default function UsersPage() {
     }
   };
 
+  // Update a single field in the form state
   const field = (key, value) => setForm(f => ({ ...f, [key]: value }));
 
   return (
     <div className="space-y-6">
-      {/* Header */}
+      {/* Header with Title and "Add User" Trigger */}
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="text-sm font-semibold uppercase tracking-wide text-emerald-700">Administration</p>
@@ -96,9 +117,10 @@ export default function UsersPage() {
         </button>
       </div>
 
+      {/* Global Error Banner */}
       {error && <p className="rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-700">{error}</p>}
 
-      {/* Table */}
+      {/* Users Data Table */}
       <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -149,7 +171,7 @@ export default function UsersPage() {
         </table>
       </div>
 
-      {/* Create / Edit Modal */}
+      {/* Create / Edit User Modal */}
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
           <div className="w-full max-w-lg rounded-2xl bg-white shadow-2xl">
@@ -218,7 +240,7 @@ export default function UsersPage() {
         </div>
       )}
 
-      {/* Delete Confirm Modal */}
+      {/* Delete Confirmation Modal */}
       {deleteTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
           <div className="w-full max-w-sm rounded-2xl bg-white shadow-2xl p-6 space-y-4">
@@ -238,6 +260,7 @@ export default function UsersPage() {
   );
 }
 
+// Reusable label and input wrapper component
 function FormField({ label, disabled, children }) {
   return (
     <div className="space-y-1">

@@ -14,7 +14,8 @@ export default function SaleForm({
   saving, 
   message, 
   messageType = 'error',
-  printerName = 'EPSON TM-T81III Receipt',
+  printerName = '',
+  configuredInDb = false,
   printers = [],
   printerStatus = 'Ready',
   isPrinterOnline = true,
@@ -62,35 +63,29 @@ export default function SaleForm({
       <div className="flex items-center gap-2 min-w-0 flex-1">
         <Printer size={16} className="text-[#2d7ab5] shrink-0" />
         <span className="font-semibold text-zinc-700 shrink-0">Printer:</span>
-        {printers && printers.length > 1 ? (
-          <select
-            value={printerName}
-            onChange={e => onPrinterChange?.(e.target.value)}
-            disabled={true}
-            aria-label="Select printer machine"
-            className="max-w-[210px] truncate rounded border border-zinc-300 bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600 shadow-xs cursor-not-allowed opacity-80"
-          >
-            {printers.map(p => (
-              <option key={p.name} value={p.name}>
-                {p.name} {p.available === false ? '(Offline)' : ''}
-              </option>
-            ))}
-          </select>
-        ) : (
+        {configuredInDb && printerName ? (
           <span className="font-medium text-zinc-900 truncate" title={printerName}>
-            {printerName || 'EPSON TM-T81III Receipt'}
+            {printerName}
+          </span>
+        ) : (
+          <span className="font-medium text-zinc-500 italic truncate" title="Printer setup required">
+            Not Configured
           </span>
         )}
       </div>
 
       <div className="flex items-center gap-2 shrink-0">
         <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${
-          isPrinterOnline 
+          configuredInDb && isPrinterOnline 
             ? 'bg-emerald-100 text-emerald-800' 
             : 'bg-rose-100 text-rose-800'
         }`}>
-          <span className={`h-1.5 w-1.5 rounded-full ${isPrinterOnline ? 'bg-emerald-600' : 'bg-rose-600'}`} />
-          {isPrinterOnline ? 'Ready' : (printerStatus && printerStatus !== 'Offline' ? printerStatus : 'Not Connect')}
+          <span className={`h-1.5 w-1.5 rounded-full ${
+            configuredInDb && isPrinterOnline ? 'bg-emerald-600' : 'bg-rose-600'
+          }`} />
+          {!configuredInDb 
+            ? 'Setup Required' 
+            : (isPrinterOnline ? 'Ready' : (printerStatus && printerStatus !== 'Offline' ? printerStatus : 'Not Connect'))}
         </span>
         {onRefreshPrinters && (
           <button
@@ -147,7 +142,8 @@ export default function SaleForm({
       )}
       
       <button 
-        disabled={!form.flightNo.trim() || !form.company.trim() || disabled} 
+        disabled={!form.flightNo.trim() || !form.company.trim() || disabled || !configuredInDb || !isPrinterOnline} 
+        title={!configuredInDb ? 'Cannot print: Printer setup required' : (!isPrinterOnline ? 'Printer is offline or not connected' : 'Print ticket')}
         className="group flex h-11 flex-1 items-center justify-center gap-2 rounded-md border border-[#1d5f93] bg-[#2d7ab5] text-base font-medium text-white shadow-sm transition-all hover:bg-[#1d5f93] hover:shadow-md active:scale-95 disabled:pointer-events-none disabled:border-zinc-400 disabled:bg-zinc-300 disabled:text-zinc-500 disabled:shadow-none"
       >
         <Printer size={18} className="transition-transform group-hover:-translate-y-0.5 group-hover:scale-110" />

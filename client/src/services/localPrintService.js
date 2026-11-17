@@ -31,9 +31,11 @@ export async function getLocalPrinters() {
   return request('/api/printers');
 }
 
-export async function printReportPdf(blob, printerName) {
+export async function printReportPdf(blob, printerName, options = {}) {
   const params = new URLSearchParams();
   if (printerName) params.set('printer', printerName);
+  if (options.scale) params.set('scale', options.scale);
+  if (options.paperSize) params.set('paperSize', options.paperSize);
   return request(`/api/print?${params}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/pdf' },

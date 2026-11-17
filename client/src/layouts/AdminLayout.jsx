@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { AlertOctagon, BarChart3, ChevronDown, Clock3, FileBarChart, History, LogOut, Plane, Ticket } from 'lucide-react';
 import aaslLogo from '../assets/aasl-logo.svg';
+import { AIRPORT_INFO } from '../utils/sessionReportSummary';
 
 export default function AdminLayout({ children, user, onLogout }) {
   const path = window.location.pathname;
@@ -27,7 +28,9 @@ export default function AdminLayout({ children, user, onLogout }) {
     return time;
   });
 
-  const airportName = user?.airport ? `${user.airport} - Katunayake` : 'BIA - Katunayake';
+  const airportCode = user?.airport || 'BIA';
+  const airportMeta = AIRPORT_INFO[airportCode] || AIRPORT_INFO.BIA;
+  const airportName = `${airportCode} - ${airportMeta.location}`;
   const adminId = user?.epfNumber || user?.username || '1001';
 
   return <div className="min-h-screen bg-slate-100 text-slate-900">

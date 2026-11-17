@@ -1,7 +1,8 @@
-import { getPoolForAirport, sql } from '../config/db.js';
+import { getPoolForAirport, connectAirportDatabase, sql } from '../config/db.js';
 import { getDaySummary } from '../services/salesService.js';
 import { getBusinessDate, toBusinessDateTime } from '../utils/businessDate.js';
 import { syncSessionToIfs } from '../services/ifsSyncService.js';
+import { syncSaleToMirror, syncVoidToMirror } from '../services/mirrorSyncService.js';
 
 function isValidDateOnly(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -51,6 +52,18 @@ async function ensurePaymentColumns(pool) {
 export async function getTodaySales(req, res) 
 { const pool = getPoolForAirport(req.user?.airport || 'BIA'); res.json(await getDaySummary(getBusinessDate(), req.user?.sessionId, pool)); }
 
+// Used by the counter header. A successful response means that both the API
+// and the signed-in user's airport database are reachable.
+export async function getConnectionStatus(req, res) {
+  try {
+    const pool = await connectAirportDatabase(req.user?.airport || 'BIA');
+    await pool.request().query('SELECT 1 AS connected');
+    res.json({ server: 'connected', database: 'connected', airport: req.user?.airport || 'BIA' });
+  } catch (error) {
+    res.status(200).json({ server: 'disconnected', database: 'disconnected', airport: req.user?.airport || 'BIA', error: error.message });
+  }
+}
+
 export async function createSale(req, res) {
   const operatorId = String(req.user?.epfNumber || '').trim();
   if (!operatorId) return res.status(401).json({ message: 'A verified operator identity is required to record a sale.' });
@@ -94,16 +107,40 @@ export async function createSale(req, res) {
       ), 0) + 1;
       DECLARE @now DATETIME = GETDATE();
 
-      INSERT INTO ${targetTable} (${subTableCols})
-      VALUES (${subTableVals});
+      IF COLUMNPROPERTY(OBJECT_ID('${targetTable}'), 'ID', 'IsIdentity') = 1
+      BEGIN
+        SET IDENTITY_INSERT ${targetTable} ON;
+        INSERT INTO ${targetTable} (ID, ${subTableCols})
+        VALUES (@NewSubSerialNo, ${subTableVals});
+        SET IDENTITY_INSERT ${targetTable} OFF;
+      END
+      ELSE
+      BEGIN
+        INSERT INTO ${targetTable} (ID, ${subTableCols})
+        VALUES (@NewSubSerialNo, ${subTableVals});
+      END;
+
+      DECLARE @NewSubId INT = @NewSubSerialNo;
 
       INSERT INTO dbo.TICKETING_C (SERIALNO, F_NO, COMPANY, TICKET_TYPE_ID, QTY, CHARGE, USERID, SESSIONENDFLAG, DATETIME, SessionId, CREDIT, RECEIPT_NO)
-      OUTPUT inserted.ID AS id, @NewSubSerialNo AS serialNo, CONVERT(char(10), inserted.DATETIME, 23) AS businessDate, inserted.F_NO AS flightNo,
+      OUTPUT inserted.ID AS id, @NewSubId AS subId, @NewSubSerialNo AS serialNo, inserted.RECEIPT_NO AS receiptNo, CONVERT(char(10), inserted.DATETIME, 23) AS businessDate, inserted.F_NO AS flightNo,
         inserted.COMPANY AS company, inserted.TICKET_TYPE_ID AS ticketType, inserted.QTY AS qty,
-        inserted.CHARGE AS amount, 'counter' AS source, inserted.DATETIME AS createdAt, inserted.SessionId AS sessionId
-      VALUES (@NewSerialNo, @flightNo, @company, @ticketTypeId, @qty, @charge, @userId, @sessionEndFlag, @now, @sessionId, @creditFlag, @NewSubSerialNo);
+        inserted.CHARGE AS amount, 'counter' AS source, inserted.DATETIME AS createdAt, inserted.SessionId AS sessionId,
+        inserted.USERID AS userId, inserted.CREDIT AS credit
+      VALUES (@NewSerialNo, @flightNo, @company, @ticketTypeId, @qty, @charge, @userId, @sessionEndFlag, @now, @sessionId, @creditFlag, @NewSubId);
     `);
-  res.status(201).json({ sale: result.recordset[0], summary: await getDaySummary(businessDate, req.user?.sessionId, pool) });
+
+  const createdSale = { ...result.recordset[0], airport: req.user?.airport || 'BIA' };
+
+  // Mirror to secondary database (10.64.30.48 / Garlanding_3) if configured
+  syncSaleToMirror(createdSale).catch(err => {
+    console.error(`[Mirror] Failed to mirror ticket #${createdSale.serialNo || createdSale.id}:`, err.message);
+  });
+
+  res.status(201).json({
+    sale: createdSale,
+    summary: await getDaySummary(businessDate, req.user?.sessionId, pool)
+  });
 }
 
 export async function closeTodaySales(req, res) {
@@ -290,12 +327,43 @@ export async function closeTodaySales(req, res) {
     } catch {}
 
     const incRes = await pool.request().input('sessionId', req.user?.sessionId).query(`
-      SELECT TICKET_TYPE, START_SERIAL_NO, END_SERIAL_NO, CASH_COUNT, CREDIT_COUNT
+      SELECT TICKET_TYPE, START_SERIAL_NO, END_SERIAL_NO, CASH_COUNT, CREDIT_COUNT,
+             SESSION_INCOME, SESSION_INCOME_CREDIT
       FROM dbo.SESSIONINCOME
       WHERE SessionId = @sessionId
     `);
     const gInc = incRes.recordset.find(r => r.TICKET_TYPE === 1) || {};
     const pInc = incRes.recordset.find(r => r.TICKET_TYPE === 2) || {};
+
+    let shiftName = '';
+    try {
+      const sRes = await pool.request().input('sessionId', req.user?.sessionId).query(
+        'SELECT TOP 1 shiftName FROM dbo.tblSESSION WHERE sessionId = @sessionId'
+      );
+      shiftName = sRes.recordset[0]?.shiftName || '';
+    } catch {}
+    if (!shiftName) {
+      try {
+        const shRes = await pool.request().query('SELECT TOP 1 ShiftName FROM dbo.SHIFT ORDER BY ShiftID ASC');
+        shiftName = shRes.recordset[0]?.ShiftName || 'Shift A';
+      } catch {
+        shiftName = 'Shift A';
+      }
+    }
+
+    let gCancelCount = 0;
+    let pCancelCount = 0;
+    try {
+      const cancelRes = await pool.request().input('sessionId', req.user?.sessionId).query(`
+        SELECT 
+          ISNULL(SUM(CASE WHEN TICKET_TYPE_ID = 1 THEN 1 ELSE 0 END), 0) AS gCancel,
+          ISNULL(SUM(CASE WHEN TICKET_TYPE_ID IN (2, 3) THEN 1 ELSE 0 END), 0) AS pCancel
+        FROM dbo.ERRORTICKETING
+        WHERE SessionId = @sessionId
+      `);
+      gCancelCount = Number(cancelRes.recordset[0]?.gCancel || 0);
+      pCancelCount = Number(cancelRes.recordset[0]?.pCancel || 0);
+    } catch {}
 
     await syncSessionToIfs({
       sessionId: req.user?.sessionId,
@@ -305,18 +373,112 @@ export async function closeTodaySales(req, res) {
       sessionEndedAt,
       garlanding: {
         unitPrice: ticketPrices.GARLANDING,
-        cashQty: (gInc.CASH_COUNT || 0) + manualGarlandingCashQty,
-        creditQty: (gInc.CREDIT_COUNT || 0) + manualGarlandingCreditQty,
+        cashQty: gInc.CASH_COUNT || 0,
+        creditQty: gInc.CREDIT_COUNT || 0,
         minSerial: gInc.START_SERIAL_NO,
         maxSerial: gInc.END_SERIAL_NO,
       },
       pagingBoard: {
         unitPrice: ticketPrices['PAGING BOARD'],
-        cashQty: (pInc.CASH_COUNT || 0) + manualPagingBoardCashQty,
-        creditQty: (pInc.CREDIT_COUNT || 0) + manualPagingBoardCreditQty,
+        cashQty: pInc.CASH_COUNT || 0,
+        creditQty: pInc.CREDIT_COUNT || 0,
         minSerial: pInc.START_SERIAL_NO,
         maxSerial: pInc.END_SERIAL_NO,
       },
+      manualGarlanding: {
+        unitPrice: ticketPrices.GARLANDING,
+        cashQty: manualGarlandingCashQty || 0,
+        creditQty: manualGarlandingCreditQty || 0,
+      },
+      manualPagingBoard: {
+        unitPrice: ticketPrices['PAGING BOARD'],
+        cashQty: manualPagingBoardCashQty || 0,
+        creditQty: manualPagingBoardCreditQty || 0,
+      },
+    });
+
+    const gSysCashQty = Number(gInc.CASH_COUNT || 0);
+    const gSysCashAmt = gSysCashQty * ticketPrices.GARLANDING;
+    const gSysCreditQty = Number(gInc.CREDIT_COUNT || 0);
+    const gSysCreditAmt = gSysCreditQty * ticketPrices.GARLANDING;
+    const gSysTotalQty = gSysCashQty + gSysCreditQty;
+    const gSysTotalAmt = gSysCashAmt + gSysCreditAmt;
+    const gManCashQty = manualGarlandingCashQty || 0;
+    const gManCashAmt = gManCashQty * ticketPrices.GARLANDING;
+    const gManCreditQty = manualGarlandingCreditQty || 0;
+    const gManCreditAmt = gManCreditQty * ticketPrices.GARLANDING;
+
+    const currentAirport = req.user?.airport || 'BIA';
+    const garlandingReceipt = {
+      airport: currentAirport,
+      sessionId: req.user?.sessionId,
+      userId: req.user?.epfNumber || '',
+      userName: operatorName || req.user?.epfNumber || '',
+      shiftName,
+      sessionStartedAt,
+      sessionEndedAt,
+      ticketType: 'GARLANDING',
+      title: 'GARLANDING SESSION SUMMARY RECEIPT',
+      startSerial: gInc.START_SERIAL_NO ? `${currentAirport} - AG${String(gInc.START_SERIAL_NO).padStart(8, '0')}` : '-',
+      endSerial: gInc.END_SERIAL_NO ? `${currentAirport} - AG${String(gInc.END_SERIAL_NO).padStart(8, '0')}` : '-',
+      cancelTickets: gCancelCount,
+      systemCashQty: gSysCashQty,
+      systemCashAmount: gSysCashAmt,
+      systemCreditQty: gSysCreditQty,
+      systemCreditAmount: gSysCreditAmt,
+      systemTotalQty: gSysTotalQty,
+      systemTotalAmount: gSysTotalAmt,
+      manualCashQty: gManCashQty,
+      manualCashAmount: gManCashAmt,
+      manualCreditQty: gManCreditQty,
+      manualCreditAmount: gManCreditAmt,
+      grandTotalQty: gSysTotalQty + gManCashQty + gManCreditQty,
+      grandTotalAmount: gSysTotalAmt + gManCashAmt + gManCreditAmt,
+    };
+
+    const pSysCashQty = Number(pInc.CASH_COUNT || 0);
+    const pSysCashAmt = pSysCashQty * ticketPrices['PAGING BOARD'];
+    const pSysCreditQty = Number(pInc.CREDIT_COUNT || 0);
+    const pSysCreditAmt = pSysCreditQty * ticketPrices['PAGING BOARD'];
+    const pSysTotalQty = pSysCashQty + pSysCreditQty;
+    const pSysTotalAmt = pSysCashAmt + pSysCreditAmt;
+    const pManCashQty = manualPagingBoardCashQty || 0;
+    const pManCashAmt = pManCashQty * ticketPrices['PAGING BOARD'];
+    const pManCreditQty = manualPagingBoardCreditQty || 0;
+    const pManCreditAmt = pManCreditQty * ticketPrices['PAGING BOARD'];
+
+    const pagingBoardReceipt = {
+      airport: currentAirport,
+      sessionId: req.user?.sessionId,
+      userId: req.user?.epfNumber || '',
+      userName: operatorName || req.user?.epfNumber || '',
+      shiftName,
+      sessionStartedAt,
+      sessionEndedAt,
+      ticketType: 'PAGING BOARD',
+      title: 'PAGING BOARD SESSION SUMMARY RECEIPT',
+      startSerial: pInc.START_SERIAL_NO ? `${currentAirport} - AP${String(pInc.START_SERIAL_NO).padStart(8, '0')}` : '-',
+      endSerial: pInc.END_SERIAL_NO ? `${currentAirport} - AP${String(pInc.END_SERIAL_NO).padStart(8, '0')}` : '-',
+      cancelTickets: pCancelCount,
+      systemCashQty: pSysCashQty,
+      systemCashAmount: pSysCashAmt,
+      systemCreditQty: pSysCreditQty,
+      systemCreditAmount: pSysCreditAmt,
+      systemTotalQty: pSysTotalQty,
+      systemTotalAmount: pSysTotalAmt,
+      manualCashQty: pManCashQty,
+      manualCashAmount: pManCashAmt,
+      manualCreditQty: pManCreditQty,
+      manualCreditAmount: pManCreditAmt,
+      grandTotalQty: pSysTotalQty + pManCashQty + pManCreditQty,
+      grandTotalAmount: pSysTotalAmt + pManCashAmt + pManCreditAmt,
+    };
+
+    const summary = await getDaySummary(businessDate, req.user?.sessionId, pool);
+    return res.json({
+      ...summary,
+      summary,
+      sessionReceipts: [garlandingReceipt, pagingBoardReceipt]
     });
   } catch (ifsError) {
     console.error('IFS sync error on session close:', ifsError.message);
@@ -357,7 +519,11 @@ export async function getSalesHistory(req, res) {
   const typeFilter = isPagingBoard ? 'TICKET_TYPE_ID IN (2, 3)' : 'TICKET_TYPE_ID = 1';
   const dateFilter = (date
     ? ' AND DATETIME >= CONVERT(date, @date) AND DATETIME < DATEADD(day, 1, CONVERT(date, @date))'
-    : '') + ' AND SERIALNO NOT IN (SELECT SERIALNO FROM dbo.ERRORTICKETING WHERE SERIALNO IS NOT NULL)';
+    : '') + ` AND NOT EXISTS (
+      SELECT 1 FROM dbo.ERRORTICKETING e 
+      WHERE e.SERIALNO = ${historyTable}.SERIALNO 
+        AND ${isPagingBoard ? 'e.TICKET_TYPE_ID IN (2, 3)' : 'e.TICKET_TYPE_ID = 1'}
+    )`;
   const offset = (page - 1) * limit;
 
   const pool = getPoolForAirport(airport);
@@ -436,8 +602,9 @@ export async function getSalesReport(req, res) {
   const request = pool.request();
   let where = '';
   if (shift) {
+    request.input('shiftId', shift.id);
     request.input('startAt', shift.startAt).input('endAt', shift.endAt);
-    where = 'WHERE DATETIME >= @startAt AND DATETIME <= @endAt';
+    where = 'WHERE (SessionId = @shiftId OR (SessionId IS NULL AND DATETIME >= @startAt AND DATETIME <= @endAt))';
   } else if (date) {
     request.input('businessDate', date);
     where = 'WHERE CONVERT(char(10), DATETIME, 23) = @businessDate';
@@ -460,13 +627,21 @@ export async function getSalesReport(req, res) {
     : ticketTypes.includes('GARLANDING')
       ? ' AND TICKET_TYPE_ID = 1'
       : ' AND TICKET_TYPE_ID IN (2, 3)';
-  const ticketWhere = `${where}${systemTypeFilter} AND SERIALNO NOT IN (SELECT SERIALNO FROM dbo.ERRORTICKETING WHERE SERIALNO IS NOT NULL)`;
+  const ticketWhere = `${where}${systemTypeFilter} AND NOT EXISTS (
+    SELECT 1 FROM dbo.ERRORTICKETING e 
+    WHERE (
+      (dbo.TICKETING_C.RECEIPT_NO IS NOT NULL AND (e.RECEIPT_NO = dbo.TICKETING_C.RECEIPT_NO OR e.SERIALNO = dbo.TICKETING_C.RECEIPT_NO))
+      OR (dbo.TICKETING_C.RECEIPT_NO IS NULL AND e.SERIALNO = dbo.TICKETING_C.SERIALNO)
+    )
+    AND (e.TICKET_TYPE_ID = dbo.TICKETING_C.TICKET_TYPE_ID 
+         OR (dbo.TICKETING_C.TICKET_TYPE_ID IN (2, 3) AND e.TICKET_TYPE_ID IN (2, 3)))
+  )`;
 
   const result = await request.query(`
     SELECT CASE WHEN TICKET_TYPE_ID IN (2, 3) THEN 2 ELSE TICKET_TYPE_ID END AS ticketTypeId, COUNT(*) AS transactions, ISNULL(SUM(QTY), 0) AS items, ISNULL(SUM(CHARGE), 0) AS amount
     FROM dbo.TICKETING_C ${ticketWhere}
     GROUP BY CASE WHEN TICKET_TYPE_ID IN (2, 3) THEN 2 ELSE TICKET_TYPE_ID END;
-    SELECT ID AS id, SERIALNO AS serialNo, F_NO AS flightNo, COMPANY AS company, TICKET_TYPE_ID AS ticketTypeId,
+    SELECT ID AS id, SERIALNO AS serialNo, RECEIPT_NO AS receiptNo, F_NO AS flightNo, COMPANY AS company, TICKET_TYPE_ID AS ticketTypeId,
            QTY AS qty, CHARGE AS amount, DATETIME AS createdAt, SessionId AS sessionId,
            ISNULL(CREDIT, 0) AS credit, USERID AS userId
     FROM dbo.TICKETING_C ${ticketWhere}
@@ -486,9 +661,10 @@ export async function getSalesReport(req, res) {
   let voidWhere = '';
   if (shift) {
     manualRequest.input('shiftId', shift.id);
+    voidRequest.input('shiftId', shift.id);
     voidRequest.input('startAt', shift.startAt).input('endAt', shift.endAt);
     manualWhere = 'WHERE SessionId = @shiftId';
-    voidWhere = 'WHERE DATETIME >= @startAt AND DATETIME <= @endAt';
+    voidWhere = 'WHERE (SessionId = @shiftId OR (SessionId IS NULL AND DATETIME >= @startAt AND DATETIME <= @endAt))';
   } else {
     manualRequest.input('businessDate', date);
     voidRequest.input('businessDate', date);
@@ -497,6 +673,25 @@ export async function getSalesReport(req, res) {
   }
   manualWhere += manualTypeFilter;
   voidWhere += voidTypeFilter;
+
+  let incomeStartSerial = null;
+  let incomeEndSerial = null;
+  if (shift) {
+    try {
+      const incReq = pool.request().input('shiftId', shift.id);
+      let incTypeFilter = '';
+      if (!allTicketTypes) {
+        incTypeFilter = ticketTypes.includes('GARLANDING') ? ' AND TICKET_TYPE = 1' : ' AND TICKET_TYPE = 2';
+      }
+      const incRes = await incReq.query(`
+        SELECT MIN(START_SERIAL_NO) AS minStart, MAX(END_SERIAL_NO) AS maxEnd
+        FROM dbo.SESSIONINCOME
+        WHERE SessionId = @shiftId ${incTypeFilter}
+      `);
+      if (incRes.recordset[0]?.minStart != null) incomeStartSerial = Number(incRes.recordset[0].minStart);
+      if (incRes.recordset[0]?.maxEnd != null) incomeEndSerial = Number(incRes.recordset[0].maxEnd);
+    } catch {}
+  }
 
   const [manualResult, voidResult] = await Promise.all([
     manualRequest.query(`
@@ -508,7 +703,14 @@ export async function getSalesReport(req, res) {
       FROM dbo.SESSION_MANUAL_SALES ${manualWhere}
       GROUP BY TICKET_TYPE, userId
     `),
-    voidRequest.query(`SELECT COUNT(*) AS count FROM dbo.ERRORTICKETING ${voidWhere}`)
+    voidRequest.query(`
+      SELECT COUNT(*) AS count,
+             MIN(SERIALNO) AS minSerial,
+             MAX(SERIALNO) AS maxSerial,
+             MIN(ID) AS minId,
+             MAX(ID) AS maxId
+      FROM dbo.ERRORTICKETING ${voidWhere}
+    `)
   ]);
   const manualSales = manualResult.recordset.map(row => ({
     ticketType: Number(row.ticketType),
@@ -518,9 +720,30 @@ export async function getSalesReport(req, res) {
     creditAmount: Number(row.creditAmount),
     userId: row.userId
   }));
+
+  const voidData = voidResult.recordset[0] || {};
+  const voidMinSerial = voidData.minSerial != null ? Number(voidData.minSerial) : null;
+  const voidMaxSerial = voidData.maxSerial != null ? Number(voidData.maxSerial) : null;
+  const voidMinId = voidData.minId != null ? Number(voidData.minId) : null;
+  const voidMaxId = voidData.maxId != null ? Number(voidData.maxId) : null;
+
+  const validSerials = [
+    ...tickets.map(ticket => Number(ticket.serialNo)),
+    voidMinSerial,
+    voidMaxSerial,
+    incomeStartSerial,
+    incomeEndSerial
+  ].filter(Number.isFinite);
+
+  const validIds = [
+    ...tickets.map(ticket => Number(ticket.receiptNo ?? ticket.id)),
+    voidMinId,
+    voidMaxId,
+    ...validSerials
+  ].filter(Number.isFinite);
+
   const total = summaries.reduce((sum, row) => sum + Number(row.amount || 0), 0);
   const items = summaries.reduce((sum, row) => sum + Number(row.items || 0), 0);
-  const serialNumbers = tickets.map(ticket => Number(ticket.serialNo)).filter(Number.isFinite);
   const users = [...new Set([
     ...tickets.map(ticket => ticket.userId),
     ...manualSales.map(sale => sale.userId)
@@ -532,9 +755,11 @@ export async function getSalesReport(req, res) {
     date: date || (shift ? new Date(shift.startAt).toISOString().slice(0, 10) : null),
     totals: { amount: total, items, transactions: tickets.length },
     breakdown: summaries.map(row => ({ ticketType: row.ticketTypeId === 2 || row.ticketTypeId === 3 ? 'Paging Board' : 'Garlanding', transactions: Number(row.transactions), items: Number(row.items), amount: Number(row.amount) })),
-    startSerialNo: serialNumbers.length ? Math.min(...serialNumbers) : null,
-    endSerialNo: serialNumbers.length ? Math.max(...serialNumbers) : null,
-    cancelledTickets: Number(voidResult.recordset[0]?.count || 0),
+    startId: validIds.length ? Math.min(...validIds) : (validSerials.length ? Math.min(...validSerials) : null),
+    endId: validIds.length ? Math.max(...validIds) : (validSerials.length ? Math.max(...validSerials) : null),
+    startSerialNo: validSerials.length ? Math.min(...validSerials) : null,
+    endSerialNo: validSerials.length ? Math.max(...validSerials) : null,
+    cancelledTickets: Number(voidData.count || 0),
     users,
     manualSales,
     tickets
@@ -577,15 +802,30 @@ export async function voidTicket(req, res) {
       .input('createdAt', ticket.createdAt)
       .input('userId', ticket.userId || operatorId)
       .input('sessionId', ticket.sessionId ?? null)
+      .input('receiptNo', ticket.receiptNo ?? ticket.serialNo)
       .query(`
         SELECT TOP 1 SERIALNO, ID FROM ${subTable}
-        WHERE DATETIME = @createdAt AND USERID = @userId 
-          AND (SessionId = @sessionId OR (SessionId IS NULL AND @sessionId IS NULL))
+        WHERE ID = @receiptNo OR SERIALNO = @receiptNo
+           OR (DATETIME = @createdAt AND USERID = @userId 
+               AND (SessionId = @sessionId OR (SessionId IS NULL AND @sessionId IS NULL)))
+        ORDER BY CASE WHEN ID = @receiptNo THEN 0 WHEN SERIALNO = @receiptNo THEN 1 ELSE 2 END, ID DESC
       `);
-    const actualSubSerial = subRecord.recordset[0]?.SERIALNO ?? ticket.receiptNo ?? ticket.serialNo;
+    const actualSubSerial = subRecord.recordset[0]?.SERIALNO ?? ticket.serialNo;
+    let actualSubId = subRecord.recordset[0]?.ID ?? ticket.receiptNo;
+    if (!actualSubId) {
+      const maxSubRes = await new sql.Request(transaction).query(`
+        SELECT MAX(id) AS maxId FROM (
+          SELECT MAX(ID) AS id FROM ${subTable}
+          UNION ALL
+          SELECT MAX(ID) AS id FROM dbo.ERRORTICKETING WHERE ${ticket.ticketTypeId === 1 ? 'TICKET_TYPE_ID = 1' : 'TICKET_TYPE_ID IN (2, 3)'}
+        ) AS m
+      `);
+      actualSubId = (maxSubRes.recordset[0]?.maxId || 0) + 1;
+    }
 
     const reqTx = new sql.Request(transaction);
-    reqTx.input('serialNo', actualSubSerial)
+    reqTx.input('id', actualSubId)
+      .input('serialNo', actualSubSerial)
       .input('ticketTypeId', ticket.ticketTypeId)
       .input('userId', ticket.userId || operatorId)
       .input('sessionEndFlag', ticket.sessionEndFlag || 'N')
@@ -598,15 +838,31 @@ export async function voidTicket(req, res) {
       .input('credit', ticket.credit);
 
     await reqTx.query(`
-      IF COL_LENGTH('dbo.ERRORTICKETING', 'RECEIPT_NO') IS NOT NULL
+      IF COLUMNPROPERTY(OBJECT_ID('dbo.ERRORTICKETING'), 'ID', 'IsIdentity') = 1
       BEGIN
-        INSERT INTO dbo.ERRORTICKETING (ID, SERIALNO, TICKET_TYPE_ID, USERID, SESSIONENDFLAG, DATETIME, CHARGE, QTY, F_NO, COMPANY, RECEIPT_NO, SessionId, CREDIT)
-        VALUES (@serialNo, @serialNo, @ticketTypeId, @userId, @sessionEndFlag, @createdAt, @charge, @qty, @flightNo, @company, @serialNo, @sessionId, @credit);
+        IF COL_LENGTH('dbo.ERRORTICKETING', 'RECEIPT_NO') IS NOT NULL
+        BEGIN
+          INSERT INTO dbo.ERRORTICKETING (SERIALNO, TICKET_TYPE_ID, USERID, SESSIONENDFLAG, DATETIME, CHARGE, QTY, F_NO, COMPANY, RECEIPT_NO, SessionId, CREDIT)
+          VALUES (@serialNo, @ticketTypeId, @userId, @sessionEndFlag, @createdAt, @charge, @qty, @flightNo, @company, @id, @sessionId, @credit);
+        END
+        ELSE
+        BEGIN
+          INSERT INTO dbo.ERRORTICKETING (SERIALNO, TICKET_TYPE_ID, USERID, SESSIONENDFLAG, DATETIME, CHARGE, QTY, F_NO, COMPANY, SessionId, CREDIT)
+          VALUES (@serialNo, @ticketTypeId, @userId, @sessionEndFlag, @createdAt, @charge, @qty, @flightNo, @company, @sessionId, @credit);
+        END
       END
       ELSE
       BEGIN
-        INSERT INTO dbo.ERRORTICKETING (ID, SERIALNO, TICKET_TYPE_ID, USERID, SESSIONENDFLAG, DATETIME, CHARGE, QTY, F_NO, COMPANY, SessionId, CREDIT)
-        VALUES (@serialNo, @serialNo, @ticketTypeId, @userId, @sessionEndFlag, @createdAt, @charge, @qty, @flightNo, @company, @sessionId, @credit);
+        IF COL_LENGTH('dbo.ERRORTICKETING', 'RECEIPT_NO') IS NOT NULL
+        BEGIN
+          INSERT INTO dbo.ERRORTICKETING (ID, SERIALNO, TICKET_TYPE_ID, USERID, SESSIONENDFLAG, DATETIME, CHARGE, QTY, F_NO, COMPANY, RECEIPT_NO, SessionId, CREDIT)
+          VALUES (@serialNo, @serialNo, @ticketTypeId, @userId, @sessionEndFlag, @createdAt, @charge, @qty, @flightNo, @company, @serialNo, @sessionId, @credit);
+        END
+        ELSE
+        BEGIN
+          INSERT INTO dbo.ERRORTICKETING (ID, SERIALNO, TICKET_TYPE_ID, USERID, SESSIONENDFLAG, DATETIME, CHARGE, QTY, F_NO, COMPANY, SessionId, CREDIT)
+          VALUES (@serialNo, @serialNo, @ticketTypeId, @userId, @sessionEndFlag, @createdAt, @charge, @qty, @flightNo, @company, @sessionId, @credit);
+        END
       END
     `);
 
@@ -624,6 +880,11 @@ export async function voidTicket(req, res) {
       `);
 
     await transaction.commit();
+
+    // Mirror void to secondary database (10.64.30.48 / Garlanding_3) if configured
+    syncVoidToMirror(ticket).catch(err => {
+      console.error(`[Mirror] Failed to mirror void for ticket #${ticket.serialNo}:`, err.message);
+    });
   } catch (err) {
     await transaction.rollback();
     throw err;

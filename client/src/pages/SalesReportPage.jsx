@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { getSalesReport, getShiftSessions } from '../services/salesService';
 import { getLocalPrinters, printReportPdf } from '../services/localPrintService';
 import { formatBusinessDateTime as displayDate } from '../utils/formatters';
-import { formatReportDate, formatReportMoney as money, formatReportSerial, getSessionReportSummary } from '../utils/sessionReportSummary';
+import { formatReportDate, formatReportMoney as money, formatReportSerial, getSessionReportSummary, AIRPORT_INFO } from '../utils/sessionReportSummary';
 import { createSalesReportPdf } from '../utils/reportDownloader';
 import aaslLogo from '../assets/aasl-logo.svg';
 
@@ -83,6 +83,7 @@ export default function SalesReportPage() {
   const preview = async event => {
     event.preventDefault();
     if (!filters.date) { setError('Select a date.'); setReport(null); return; }
+    if (!filters.shiftId) { setError('Select a session ID.'); setReport(null); return; }
     setLoading(true); setError('');
     try {
       const result = await getSalesReport({
@@ -131,7 +132,7 @@ export default function SalesReportPage() {
     </div>
 
     <div className="sales-report-layout grid overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-xs lg:grid-cols-[380px_1fr]">
-      <form onSubmit={preview} className="sales-report-filters border-b border-slate-200/80 p-6 lg:border-b-0 lg:border-r bg-white flex flex-col justify-between">
+      <form onSubmit={preview} className="sales-report-filters border-b border-slate-200/80 p-6 lg:border-b-0 lg:border-r bg-white flex flex-col justify-start">
         <div>
           <div className="flex items-center gap-3 pb-4 border-b border-slate-100">
             <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700 shadow-2xs border border-emerald-100/60">
@@ -193,7 +194,13 @@ export default function SalesReportPage() {
               disabled={sessionDisabled}
               className="w-full rounded-xl border border-slate-200 bg-slate-50/60 px-3.5 py-2.5 text-sm font-normal text-slate-900 outline-none transition focus:border-blue-600 focus:bg-white focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
             >
-              <option value="">{sessionDisabled ? 'Select date first' : 'Select session (optional)'}</option>
+              <option value="">
+                {sessionDisabled
+                  ? 'Select date first'
+                  : sessionsForDate.length === 0
+                    ? 'No sessions found for this date'
+                    : 'Select session'}
+              </option>
               {sessionsForDate.map(shift => (
                 <option key={shift.id} value={shift.id}>#{shift.id} · {shift.shiftType} · {displayDate(shift.startAt)}</option>
               ))}
@@ -253,8 +260,8 @@ export default function SalesReportPage() {
 
           <button
             type="submit"
-            disabled={loading}
-            className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-xs hover:bg-blue-700 transition-all cursor-pointer disabled:opacity-60"
+            disabled={loading || !filters.date || !filters.shiftId}
+            className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-xs hover:bg-blue-700 transition-all cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Search size={17} />{loading ? 'Generating…' : 'Preview Report'}
           </button>
@@ -324,15 +331,6 @@ export default function SalesReportPage() {
             <div className="sales-report-actions flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => window.print()}
-                className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-700 shadow-2xs hover:bg-slate-50 transition-all cursor-pointer"
-                title="Print report using browser (A4 portrait)"
-              >
-                <Printer size={14} />
-                <span>Browser Print</span>
-              </button>
-              <button
-                type="button"
                 onClick={preview}
                 className="rounded-xl border border-slate-200 bg-white p-2 text-slate-600 shadow-2xs hover:bg-slate-50 transition-all cursor-pointer"
                 title="Refresh report"
@@ -367,6 +365,7 @@ export default function SalesReportPage() {
 function ReportPreview({ report }) {
   const summary = getSessionReportSummary(report);
   const airport = report.airport || 'BIA';
+  const airportMeta = AIRPORT_INFO[airport] || AIRPORT_INFO.BIA;
   const users = report.users?.length ? report.users.join(', ') : '-';
   const sessionValue = report.shift?.id ?? report.date ?? '-';
   const reportTitle = report.ticketTypes?.length === 1
@@ -379,15 +378,15 @@ function ReportPreview({ report }) {
     <div>
       <header className="text-center">
         <img id="sales-report-logo" src={aaslLogo} alt="AASL Logo" className="mx-auto mb-3 h-8 w-14 object-contain" />
-        <h3 className="font-bold text-[12.5px]">Airport &amp; Aviation Services (Sri Lanka) (Private) Limited</h3>
-        <p className="mt-0.5 text-[10.5px]">Bandaranaike International Airport</p>
-        <p className="mt-0.5 text-[10px] text-slate-600">Katunayake</p>
+        <h3 className="font-bold text-[15px]">Airport &amp; Aviation Services (Sri Lanka) (Private) Limited</h3>
+        <p className="mt-0.5 text-[12px]">{airportMeta.name}</p>
+        <p className="mt-0.5 text-[11.5px] text-slate-600">{airportMeta.location}</p>
         <h4 className="mt-3.5 text-xs font-bold uppercase tracking-wider">{reportTitle}</h4>
       </header>
 
       <div className="mt-5 grid grid-cols-2 gap-x-8 gap-y-2 border-y border-slate-200 py-3.5 text-[10.5px]">
-        <ReportDetail label="Start Serial No" value={formatReportSerial(report.startSerialNo, airport, report.ticketTypes)} />
-        <ReportDetail label="End Serial No" value={formatReportSerial(report.endSerialNo, airport, report.ticketTypes)} />
+        <ReportDetail label="Start ID" value={formatReportSerial(report.startId ?? report.startSerialNo, airport, report.ticketTypes)} />
+        <ReportDetail label="End ID" value={formatReportSerial(report.endId ?? report.endSerialNo, airport, report.ticketTypes)} />
         <ReportDetail label="Start Date/Time" value={formatReportDate(report.shift?.startAt || report.date)} />
         <ReportDetail label="End Date/Time" value={formatReportDate(report.shift?.endAt || report.date)} />
         <ReportDetail label="No of Cancelled Tickets" value={report.cancelledTickets ?? 0} />
@@ -514,7 +513,7 @@ function ReportTable({ headers, rows, widths, emphasizeLastRow = false }) {
           <tr key={rowIndex} className={isBold ? 'font-bold bg-slate-50/60' : ''}>
             {row.map((cell, cellIndex) => (
               <td key={cellIndex} className="border border-black px-2 py-2 text-black">
-                {cell || '\u00a0'}
+                {cell !== null && cell !== undefined && cell !== '' ? cell : '\u00a0'}
               </td>
             ))}
           </tr>

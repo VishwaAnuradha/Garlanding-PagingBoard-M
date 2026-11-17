@@ -31,17 +31,24 @@ app.use(errorHandler);
 
 const port = process.env.PORT || 5000;
 
-connectDatabase()
-  .then(async airports => {
-    const schemaResults = await Promise.allSettled(airports.map(airport => ensureUsersSchema(airport)));
-    schemaResults.forEach((result, index) => {
-      if (result.status === 'rejected') {
-        console.error(`Could not initialize the users schema for airport ${airports[index]}:`, result.reason.message);
+app.listen(port, () => {
+  console.log(`API running on http://localhost:${port}`);
+
+  connectDatabase()
+    .then(async airports => {
+      console.log(`SQL Server connected for airports: ${(airports && airports.length) ? airports.join(', ') : 'default'}`);
+      if (Array.isArray(airports) && airports.length > 0) {
+        const schemaResults = await Promise.allSettled(airports.map(airport => ensureUsersSchema(airport)));
+        schemaResults.forEach((result, index) => {
+          if (result.status === 'rejected') {
+            console.error(`Could not initialize the users schema for airport ${airports[index]}:`, result.reason.message);
+          }
+        });
       }
+      initPrinterSync().catch(() => {});
+    })
+    .catch(error => {
+      console.error('SQL Server initial connection notice:', error.message);
+      console.warn(`[Warning] Database at ${process.env.SQL_SERVER || 'unknown'} is currently unreachable. The server will keep running and retry on incoming requests.`);
     });
-  })
-  .then(() => app.listen(port, () => console.log(`API running on http://localhost:${port}`)))
-  .catch(error => {
-    console.error('SQL Server connection failed:', error);
-    process.exit(1);
-  });
+});

@@ -1,5 +1,5 @@
 import { jsPDF } from 'jspdf';
-import { formatReportDate, formatReportMoney as money, formatReportSerial, getSessionReportSummary } from './sessionReportSummary';
+import { formatReportDate, formatReportMoney as money, formatReportSerial, getSessionReportSummary, AIRPORT_INFO } from './sessionReportSummary';
 
 const pageWidth = 210;
 const pageHeight = 297;
@@ -9,6 +9,8 @@ const contentWidth = pageWidth - margin * 2; // 182mm
 export function createSalesReportPdf(report) {
   const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
   const summary = getSessionReportSummary(report);
+  const airport = report.airport || 'BIA';
+  const airportMeta = AIRPORT_INFO[airport] || AIRPORT_INFO.BIA;
   const center = pageWidth / 2;
   let y = 14;
 
@@ -27,10 +29,10 @@ export function createSalesReportPdf(report) {
   y += 5;
   pdf.setFont('helvetica', 'normal');
   pdf.setFontSize(8.5);
-  pdf.text('Bandaranaike International Airport', center, y, { align: 'center' });
+  pdf.text(airportMeta.name, center, y, { align: 'center' });
   y += 4.5;
   pdf.setFontSize(8);
-  pdf.text('Katunayake', center, y, { align: 'center' });
+  pdf.text(airportMeta.location, center, y, { align: 'center' });
   y += 7;
 
   pdf.setFont('helvetica', 'bold');
@@ -44,13 +46,12 @@ export function createSalesReportPdf(report) {
   y += 7;
 
   const users = report.users?.length ? report.users.join(', ') : '-';
-  const airport = report.airport || 'BIA';
   const ticketTypes = (report.ticketTypes || ['GARLANDING', 'PAGING_BOARD'])
     .map(type => type === 'PAGING_BOARD' ? 'Paging Board' : 'Garlanding')
     .join(', ');
 
   const detailRows = [
-    { left: ['Start Serial No', formatReportSerial(report.startSerialNo, airport, report.ticketTypes)], right: ['End Serial No', formatReportSerial(report.endSerialNo, airport, report.ticketTypes)] },
+    { left: ['Start ID', formatReportSerial(report.startId ?? report.startSerialNo, airport, report.ticketTypes)], right: ['End ID', formatReportSerial(report.endId ?? report.endSerialNo, airport, report.ticketTypes)] },
     { left: ['Start Date/Time', formatReportDate(report.shift?.startAt || report.date)], right: ['End Date/Time', formatReportDate(report.shift?.endAt || report.date)] },
     { left: ['No of Cancelled Tickets', String(report.cancelledTickets ?? 0)], right: ['Session ID', String(report.shift?.id ?? report.date ?? '-')] },
     { left: ['No of Visitors', String(summary.totalQty)], right: ['Ticket Type', ticketTypes] },

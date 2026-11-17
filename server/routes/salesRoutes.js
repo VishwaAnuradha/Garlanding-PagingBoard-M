@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { closeTodaySales, createSale, getTodaySales, reopenTodaySales, getSalesHistory, getSalesReport, voidTicket, getErrorTickets } from '../controllers/salesController.js';
+import { closeTodaySales, createSale, getTodaySales, getConnectionStatus, reopenTodaySales, getSalesHistory, getSalesReport, voidTicket, getErrorTickets } from '../controllers/salesController.js';
 import { getDashboard, getSettings, updateSettings, getSessionIncome } from '../controllers/adminController.js';
 
 import asyncHandler from '../middleware/asyncHandler.js';
@@ -7,6 +7,7 @@ import requireAdmin from '../middleware/requireAdmin.js';
 import { createShift, getShifts, updateShiftStatus } from '../controllers/shiftController.js';
 
 const router = Router();
+router.get('/status', asyncHandler(getConnectionStatus));
 router.get('/today', asyncHandler(getTodaySales));
 router.post('/', asyncHandler(createSale));
 router.post('/close', asyncHandler(closeTodaySales));

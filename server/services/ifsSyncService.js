@@ -23,6 +23,8 @@ export async function syncSessionToIfs({
   sessionEndedAt,
   garlanding = {},
   pagingBoard = {},
+  manualGarlanding = {},
+  manualPagingBoard = {},
 }) {
   const ifsPool = getIfsPool();
   if (!ifsPool) {
@@ -39,56 +41,12 @@ export async function syncSessionToIfs({
   const epfNumeric = Number.parseInt(operatorId, 10);
   const epfVal = Number.isInteger(epfNumeric) ? epfNumeric : null;
 
-  const appConfigs = [
-    {
-      appId: 7,
-      passengerName: 'Garlanding ticket',
-      unitPrice: garlanding.unitPrice ?? 500,
-      netAmount: Number(((garlanding.unitPrice ?? 500) / 1.2102435).toFixed(2)), // 413.14 for 500
-      cashQty: garlanding.cashQty || 0,
-      creditQty: garlanding.creditQty || 0,
-      minSerial: garlanding.minSerial ?? '',
-      maxSerial: garlanding.maxSerial ?? '',
-    },
-    {
-      appId: 10,
-      passengerName: 'Paging board ticket',
-      unitPrice: pagingBoard.unitPrice ?? 300,
-      netAmount: Number(((pagingBoard.unitPrice ?? 300) / 1.2102435).toFixed(2)), // 247.88 for 300
-      cashQty: pagingBoard.cashQty || 0,
-      creditQty: pagingBoard.creditQty || 0,
-      minSerial: pagingBoard.minSerial ?? '',
-      maxSerial: pagingBoard.maxSerial ?? '',
-    },
-  ];
-
-  for (const app of appConfigs) {
-    // Collect non-zero payment lines
-    const paymentLines = [];
-    if (app.cashQty > 0) {
-      paymentLines.push({
-        paymentType: 'Cash',
-        qty: app.cashQty,
-        totalSalesPrice: app.cashQty * app.unitPrice,
-      });
-    }
-    if (app.creditQty > 0) {
-      paymentLines.push({
-        paymentType: 'CC',
-        qty: app.creditQty,
-        totalSalesPrice: app.creditQty * app.unitPrice,
-      });
-    }
-
-    if (paymentLines.length === 0) {
-      continue;
-    }
-
-    // 1. Create a log entry in dbo.tblAPILog
-    let logId = null;
+  // 1. Create a log entry in dbo.tblAPILog for each application (appId 7 and appId 10)
+  const logIdsByApp = {};
+  for (const appId of [7, 10]) {
     try {
       const logResult = await ifsPool.request()
-        .input('appId', sql.Int, app.appId)
+        .input('appId', sql.Int, appId)
         .input('sessionId', sql.Int, sessionId)
         .input('dateTime', sql.DateTime, new Date(sessionEndedAt))
         .query(`
@@ -96,60 +54,120 @@ export async function syncSessionToIfs({
           OUTPUT inserted.logId
           VALUES (@appId, @sessionId, NULL, NULL, NULL, @dateTime);
         `);
-      logId = logResult.recordset[0]?.logId ?? null;
+      logIdsByApp[appId] = logResult.recordset[0]?.logId ?? null;
     } catch (err) {
-      console.error(`Failed to insert into tblAPILog for appId ${app.appId}:`, err.message);
+      console.error(`Failed to insert into tblAPILog for appId ${appId}:`, err.message);
     }
+  }
 
-    // 2. Insert lines into dbo.tblSessionData and dbo.tblSessionLineData
-    for (const line of paymentLines) {
-      try {
-        const sessionDataResult = await ifsPool.request()
-          .input('logId', sql.Int, logId)
-          .input('appId', sql.Int, app.appId)
-          .input('sessionId', sql.Int, sessionId)
-          .input('passengerName', sql.VarChar(50), app.passengerName)
-          .input('qty', sql.Int, line.qty)
-          .input('salesPrice', sql.Decimal(18, 2), app.unitPrice)
-          .input('fromReceiptNo', sql.VarChar(50), String(app.minSerial || ''))
-          .input('toReceiptNo', sql.VarChar(50), String(app.maxSerial || ''))
-          .input('fromDate', sql.VarChar(50), fromDateTimeStr)
-          .input('toDate', sql.VarChar(50), toDateTimeStr)
-          .input('fromTime', sql.VarChar(50), fromDateTimeStr)
-          .input('toTime', sql.VarChar(50), toDateTimeStr)
-          .input('status', sql.VarChar(50), 'Approved')
-          .input('netAmount', sql.Decimal(18, 2), app.netAmount)
-          .input('userName', sql.VarChar(100), userNameStr)
-          .input('salesPrice2', sql.Decimal(18, 2), line.totalSalesPrice)
-          .input('paymentType', sql.VarChar(50), line.paymentType)
-          .input('currency', sql.VarChar(50), 'LKR')
-          .query(`
-            INSERT INTO dbo.tblSessionData (
-              logId, appId, sessionId, PassengerName, Qty, SalesPrice,
-              FromReceiptNo, ToReceiptNo, FromDate, ToDate, FromTime, ToTime,
-              status, comment, netAmount, userName, itmQty, SalesPrice2,
-              PaymentType, Currency, Site, Bank, SlipNo
-            )
-            OUTPUT inserted.appLineId
-            VALUES (
-              @logId, @appId, @sessionId, @passengerName, @qty, @salesPrice,
-              @fromReceiptNo, @toReceiptNo, @fromDate, @toDate, @fromTime, @toTime,
-              @status, NULL, @netAmount, @userName, NULL, @salesPrice2,
-              @paymentType, @currency, NULL, NULL, NULL
-            );
-          `);
+  // 2. Define the 4 parent lines for dbo.tblSessionData (one per product + payment mode)
+  // Each line combines system + manual quantity so dbo.tblSessionData has strictly 4 rows.
+  // The system/manual breakdown is stored in dbo.tblSessionLineData, linked by appLineId.
+  const sessionDataEntries = [
+    {
+      appId: 7,
+      passengerName: 'Garlanding ticket',
+      unitPrice: garlanding.unitPrice ?? 500,
+      netAmount: Number(((garlanding.unitPrice ?? 500) / 1.2102435).toFixed(2)), // 413.14 for 500
+      paymentType: 'Cash',
+      fromReceiptNo: String(garlanding.minSerial ?? ''),
+      toReceiptNo: String(garlanding.maxSerial ?? ''),
+      systemQty: Number(garlanding.cashQty || 0),
+      manualQty: Number(manualGarlanding.cashQty || 0),
+    },
+    {
+      appId: 7,
+      passengerName: 'Garlanding ticket',
+      unitPrice: garlanding.unitPrice ?? 500,
+      netAmount: Number(((garlanding.unitPrice ?? 500) / 1.2102435).toFixed(2)),
+      paymentType: 'CC',
+      fromReceiptNo: String(garlanding.minSerial ?? ''),
+      toReceiptNo: String(garlanding.maxSerial ?? ''),
+      systemQty: Number(garlanding.creditQty || 0),
+      manualQty: Number(manualGarlanding.creditQty || 0),
+    },
+    {
+      appId: 10,
+      passengerName: 'Paging board ticket',
+      unitPrice: pagingBoard.unitPrice ?? 300,
+      netAmount: Number(((pagingBoard.unitPrice ?? 300) / 1.2102435).toFixed(2)), // 247.88 for 300
+      paymentType: 'Cash',
+      fromReceiptNo: String(pagingBoard.minSerial ?? ''),
+      toReceiptNo: String(pagingBoard.maxSerial ?? ''),
+      systemQty: Number(pagingBoard.cashQty || 0),
+      manualQty: Number(manualPagingBoard.cashQty || 0),
+    },
+    {
+      appId: 10,
+      passengerName: 'Paging board ticket',
+      unitPrice: pagingBoard.unitPrice ?? 300,
+      netAmount: Number(((pagingBoard.unitPrice ?? 300) / 1.2102435).toFixed(2)),
+      paymentType: 'CC',
+      fromReceiptNo: String(pagingBoard.minSerial ?? ''),
+      toReceiptNo: String(pagingBoard.maxSerial ?? ''),
+      systemQty: Number(pagingBoard.creditQty || 0),
+      manualQty: Number(manualPagingBoard.creditQty || 0),
+    },
+  ];
 
-        const appLineId = sessionDataResult.recordset[0]?.appLineId;
+  // 3. Insert into dbo.tblSessionData (strictly 4 rows) and dbo.tblSessionLineData (breakdown)
+  for (const entry of sessionDataEntries) {
+    const logId = logIdsByApp[entry.appId] ?? null;
+    const totalQty = entry.systemQty + entry.manualQty;
+    const totalSalesPrice = totalQty * entry.unitPrice;
 
-        // 3. Insert into dbo.tblSessionLineData
-        if (appLineId) {
+    try {
+      const sessionDataResult = await ifsPool.request()
+        .input('logId', sql.Int, logId)
+        .input('appId', sql.Int, entry.appId)
+        .input('sessionId', sql.Int, sessionId)
+        .input('passengerName', sql.VarChar(50), entry.passengerName)
+        .input('qty', sql.Int, totalQty)
+        .input('salesPrice', sql.Decimal(18, 2), entry.unitPrice)
+        .input('fromReceiptNo', sql.VarChar(50), entry.fromReceiptNo)
+        .input('toReceiptNo', sql.VarChar(50), entry.toReceiptNo)
+        .input('fromDate', sql.VarChar(50), fromDateTimeStr)
+        .input('toDate', sql.VarChar(50), toDateTimeStr)
+        .input('fromTime', sql.VarChar(50), fromDateTimeStr)
+        .input('toTime', sql.VarChar(50), toDateTimeStr)
+        .input('status', sql.VarChar(50), 'Approved')
+        .input('netAmount', sql.Decimal(18, 2), entry.netAmount)
+        .input('userName', sql.VarChar(100), userNameStr)
+        .input('salesPrice2', sql.Decimal(18, 2), totalSalesPrice)
+        .input('paymentType', sql.VarChar(50), entry.paymentType)
+        .input('currency', sql.VarChar(50), 'LKR')
+        .query(`
+          INSERT INTO dbo.tblSessionData (
+            logId, appId, sessionId, PassengerName, Qty, SalesPrice,
+            FromReceiptNo, ToReceiptNo, FromDate, ToDate, FromTime, ToTime,
+            status, comment, netAmount, userName, itmQty, SalesPrice2,
+            PaymentType, Currency, Site, Bank, SlipNo
+          )
+          OUTPUT inserted.appLineId
+          VALUES (
+            @logId, @appId, @sessionId, @passengerName, @qty, @salesPrice,
+            @fromReceiptNo, @toReceiptNo, @fromDate, @toDate, @fromTime, @toTime,
+            @status, NULL, @netAmount, @userName, NULL, @salesPrice2,
+            @paymentType, @currency, NULL, NULL, NULL
+          );
+        `);
+
+      const appLineId = sessionDataResult.recordset[0]?.appLineId;
+
+      if (appLineId) {
+        const breakdowns = [
+          { billingType: 'system', qty: entry.systemQty, salesPrice: entry.systemQty * entry.unitPrice },
+          { billingType: 'manual', qty: entry.manualQty, salesPrice: entry.manualQty * entry.unitPrice },
+        ];
+
+        for (const breakdown of breakdowns) {
           await ifsPool.request()
-            .input('appId', sql.Int, app.appId)
+            .input('appId', sql.Int, entry.appId)
             .input('sessionId', sql.Int, sessionId)
-            .input('salesPrice', sql.Decimal(18, 2), line.totalSalesPrice)
-            .input('billingType', sql.VarChar(50), 'system')
+            .input('salesPrice', sql.Decimal(18, 2), breakdown.salesPrice)
+            .input('billingType', sql.VarChar(50), breakdown.billingType)
             .input('appLineId', sql.Int, appLineId)
-            .input('qty', sql.Int, line.qty)
+            .input('qty', sql.Int, breakdown.qty)
             .input('epf', sql.Int, epfVal)
             .input('dateTime', sql.DateTime, new Date(sessionEndedAt))
             .query(`
@@ -161,9 +179,9 @@ export async function syncSessionToIfs({
               );
             `);
         }
-      } catch (err) {
-        console.error(`Failed to insert into tblSessionData / tblSessionLineData for appId ${app.appId} (${line.paymentType}):`, err.message);
       }
+    } catch (err) {
+      console.error(`Failed to insert into tblSessionData / tblSessionLineData for appId ${entry.appId} (${entry.paymentType}):`, err.message);
     }
   }
 }

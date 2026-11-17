@@ -1,5 +1,13 @@
 const asNumber = value => Number(value || 0);
 
+export const AIRPORT_INFO = {
+  BIA: { code: 'BIA', name: 'Bandaranaike International Airport', location: 'Katunayake' },
+  CIAR: { code: 'CIAR', name: 'Colombo International Airport Ratmalana', location: 'Ratmalana' },
+  JIA: { code: 'JIA', name: 'Jaffna International Airport', location: 'Palaly' },
+  MRIA: { code: 'MRIA', name: 'Mattala Rajapaksa International Airport', location: 'Mattala' },
+  BTIA: { code: 'BTIA', name: 'Batticaloa International Airport', location: 'Batticaloa' }
+};
+
 export const formatReportMoney = value => `Rs: ${asNumber(value).toLocaleString('en-LK', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 export function formatReportSerial(serial, airport = 'BIA', prefix = 'AG') {
@@ -9,6 +17,8 @@ export function formatReportSerial(serial, airport = 'BIA', prefix = 'AG') {
     : (prefix === 'PAGING_BOARD' || prefix === 'PAGING BOARD' || prefix === 'AP' ? 'AP' : 'AG');
   return `${airport} - ${resolvedPrefix}${String(serial).padStart(8, '0')}`;
 }
+
+export const formatReportId = formatReportSerial;
 
 export function formatReportDate(value) {
   if (!value) return '-';

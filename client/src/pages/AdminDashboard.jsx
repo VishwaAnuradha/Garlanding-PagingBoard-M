@@ -1,14 +1,20 @@
+// Airport and Aviation Services (Sri Lanka) - Garlanding & Paging Board Counter
+// Admin Dashboard Component: Displays real-time operational KPI metrics and sales summaries
+
 import { useEffect, useState } from 'react';
 import { Activity, Banknote, Calendar, CalendarDays, CreditCard, RefreshCw, Users } from 'lucide-react';
 import { getDashboard } from '../services/salesService';
 
+// Helper function to format numbers as Sri Lankan Rupees (Rs. #,###.##)
 const money = value => `Rs. ${Number(value || 0).toLocaleString('en-LK', { maximumFractionDigits: 2 })}`;
 
 export default function AdminDashboard() {
+  // State for dashboard metrics, error feedback, and loading status
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
 
+  // Fetch dashboard summary metrics from the backend API
   const load = async () => {
     setLoading(true);
     try {
@@ -21,12 +27,15 @@ export default function AdminDashboard() {
     }
   };
 
+  // Fetch dashboard data on initial component mount
   useEffect(() => { load(); }, []);
 
+  // Extract today's figures and active session payments
   const today = data?.today || {};
   const sessionCashPayments = Number(data?.sessionCashPayments ?? today.cashPayments ?? 0);
   const sessionCreditPayments = Number(data?.sessionCreditPayments ?? today.creditPayments ?? 0);
 
+  // Format business date into readable uppercase format (e.g., "WEDNESDAY, NOVEMBER 11, 2026")
   const formatHeaderDate = (dateVal) => {
     if (!dateVal) return '';
     try {
@@ -42,6 +51,7 @@ export default function AdminDashboard() {
     }
   };
 
+  // KPI card configurations for today, session payments, weekly, and monthly totals
   const cards = [
     {
       title: "TODAY'S TICKETS",
@@ -88,6 +98,7 @@ export default function AdminDashboard() {
   ];
 
   return <div className="space-y-7">
+    {/* Dashboard Header: Title, Current Business Date, and Refresh Action */}
     <div className="flex flex-wrap items-center justify-between gap-4">
       <div>
         <p className="text-xs font-bold uppercase tracking-wider text-emerald-700">Operations Overview</p>
@@ -108,8 +119,10 @@ export default function AdminDashboard() {
       </button>
     </div>
 
+    {/* Error message banner */}
     {error && <p className="rounded-xl bg-red-50 p-4 text-sm text-red-700 border border-red-200">{error}</p>}
 
+    {/* KPI Summary Cards Grid */}
     <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
       {cards.map(({ title, value, note, Icon, bgColor }) => (
         <article
